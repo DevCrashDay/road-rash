@@ -51,6 +51,7 @@
 #include "race_music.hpp"
 #include "render_threads.hpp"
 #include "text.hpp"
+#include "sha256.hpp"
 #ifdef RR_WEB_BROWSER
 #include "platform_web.hpp"
 #include <emscripten.h>
@@ -97,9 +98,7 @@ void draw_loading(SDL_Renderer* renderer, const char* stage) {
 
 template <class Work> auto load_with_indicator(SDL_Renderer* renderer, const char* stage, Work work) {
     draw_loading(renderer, stage);
-#ifdef __EMSCRIPTEN__
-    // The web build does not enable pthreads. Native platforms animate while
-    // loading; the single-thread web build still presents the loading label.
+#if defined(__EMSCRIPTEN__) || defined(__SWITCH__)
     return work();
 #else
     auto pending = std::async(std::launch::async, std::move(work));
@@ -155,10 +154,15 @@ void quad(SDL_Renderer* r, float x0, float x1, float y0, float x2, float x3, flo
 }
 
 void play_video(const rr::Assets& assets, const std::string& path, SDL_Renderer* renderer,
-                const std::string& screenshot, long ticks, rr::DisplayDriver& display) {
-    rr::Mixer mixer(32);
-    if (ticks < 0 && SDL_InitSubSystem(SDL_INIT_AUDIO) && !mixer.open_device())
-        SDL_Log("Audio unavailable: %s", SDL_GetError());
+                const std::string& screenshot, long ticks, rr::DisplayDriver& display,
+                rr::Mixer* shared_mixer = nullptr) {
+    std::unique_ptr<rr::Mixer> owned_mixer;
+    if (!shared_mixer) {
+        owned_mixer = std::make_unique<rr::Mixer>(32);
+        if (ticks < 0 && (!SDL_InitSubSystem(SDL_INIT_AUDIO) || !owned_mixer->open_device()))
+            SDL_Log("Audio unavailable: %s", SDL_GetError());
+    }
+    rr::Mixer& mixer = shared_mixer ? *shared_mixer : *owned_mixer;
     auto loaded = load_with_indicator(renderer, "Preparing video...",
                                       [&] { return std::make_unique<rr::VideoPlayer>(assets, path, mixer); });
     auto& player = *loaded;
@@ -327,6 +331,10 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
     const std::string pref = rr::pref_directory();
     const std::string settings_path = rr::path_to_utf8(rr::path_from_utf8(pref) / "settings.txt");
     rr::Settings settings = rr::load_settings(settings_path);
+#ifdef __SWITCH__
+    // Always start with 1 controller/player; extra local players are added only via Switch Controller UI.
+    settings.local_players = 1;
+#endif
     apply_cli_overrides(settings, cli);
     if (!net_server.empty()) settings.net_server = net_server;
     rr::DisplayDriver display{window, renderer, &settings, settings_path};
@@ -352,25 +360,59 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
 #if defined(__EMSCRIPTEN__)
             constexpr auto platform = rr::net::Platform::web;
 #elif defined(__ANDROID__)
-        constexpr auto platform=rr::net::Platform::android;
+            constexpr auto platform = rr::net::Platform::android;
 #elif defined(__APPLE__)
-        constexpr auto platform=rr::net::Platform::macos;
+            constexpr auto platform = rr::net::Platform::macos;
 #elif defined(_WIN32)
-        constexpr auto platform=rr::net::Platform::windows;
+            constexpr auto platform = rr::net::Platform::windows;
+#elif defined(__SWITCH__)
+            constexpr auto platform = rr::net::Platform::switch_nx;
 #else
-        constexpr auto platform=rr::net::Platform::linux_desktop;
+            constexpr auto platform = rr::net::Platform::linux_desktop;
 #endif
-            const auto digest = rr::net::verified_data_digest(assets, [](size_t completed, size_t total) {
+            auto load_digest = [&]() {
+#ifdef __SWITCH__
+                const std::string cache_path = rr::path_to_utf8(rr::path_from_utf8(pref) / "net_digest_v2.bin");
+                std::string cache_key;
+                if (assets.exists("ROADRASH.EXE") && assets.exists("DATA/BIKESPEC.RSC") &&
+                    assets.exists("DATA/BIKERS/HIBOB.DAT")) {
+                    cache_key = rr::sha256(assets.read("ROADRASH.EXE")) + rr::sha256(assets.read("DATA/BIKESPEC.RSC")) +
+                                rr::sha256(assets.read("DATA/BIKERS/HIBOB.DAT"));
+                    if (FILE* f = std::fopen(cache_path.c_str(), "rb")) {
+                        char stored_key[192];
+                        rr::net::DataDigest cached{};
+                        const bool ok = std::fread(stored_key, 1, sizeof(stored_key), f) == sizeof(stored_key) &&
+                                        std::fread(cached.data(), 1, cached.size(), f) == cached.size() &&
+                                        cache_key.size() == sizeof(stored_key) &&
+                                        std::equal(cache_key.begin(), cache_key.end(), stored_key);
+                        std::fclose(f);
+                        if (ok) return cached;
+                    }
+                }
+#endif
+                const auto computed = rr::net::verified_data_digest(assets, [](size_t completed, size_t total) {
 #ifdef RR_WEB_BROWSER
-                rr::web_loading("Verifying game files...", int(completed), int(total));
-                // Cached/local reads may resolve without a frame. Let the browser
-                // paint completed work even when there is no network wait.
-                emscripten_sleep(0);
+                    rr::web_loading("Verifying game files...", int(completed), int(total));
+                    // Cached/local reads may resolve without a frame. Let the browser
+                    // paint completed work even when there is no network wait.
+                    emscripten_sleep(0);
 #else
-                (void)completed;
-                (void)total;
+                    (void)completed;
+                    (void)total;
 #endif
-            });
+                });
+#ifdef __SWITCH__
+                if (cache_key.size() == 192) {
+                    if (FILE* f = std::fopen(cache_path.c_str(), "wb")) {
+                        std::fwrite(cache_key.data(), 1, cache_key.size(), f);
+                        std::fwrite(computed.data(), 1, computed.size(), f);
+                        std::fclose(f);
+                    }
+                }
+#endif
+                return computed;
+            };
+            const auto digest = load_digest();
             return rr::net::make_hello(settings.alias, platform, digest);
         });
         fe.net_attach(
@@ -495,13 +537,22 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
                         music.set_volume(0);
                     else
                         music.stop();
-                    play_video(assets, ev.video, renderer, {}, -1, display);
+                    play_video(assets, ev.video, renderer, {}, -1, display, &mixer);
                     menu_stick.suspend();
                     apply_levels();
                     if (!showroom && !music.active()) music.play(music.track());
                 }
             } else if (ev.kind == rr::FrontendEvent::Kind::copy_text) {
                 SDL_SetClipboardText(ev.text.c_str());
+            } else if (ev.kind == rr::FrontendEvent::Kind::configure_controllers) {
+#ifdef __SWITCH__
+                pad.reset();
+                const int count = rr::configure_switch_controllers(fe.settings().local_players);
+                fe.set_local_players(count);
+                pad = rr::open_first_gamepad();
+                fe.set_pad_labels(rr::pad_labels(pad.get()));
+                menu_stick.suspend();
+#endif
             } else if (ev.kind == rr::FrontendEvent::Kind::start_net_race) {
                 if (menu_frames >= 0) {
                     running = false;
@@ -513,7 +564,7 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
                     return std::make_unique<rr::RaceSetup>(
                         rr::make_race_setup(assets, exe, rr::net::race_config(start)));
                 });
-                client.begin(ev.net_start, rr::net::steady_ms());
+                client.begin(ev.net_start, SDL_GetTicks());
                 music.stop();
                 race_music.play_race(ev.net_start.course, fe.player_name());
                 g.race_music = &race_music;
@@ -531,19 +582,21 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
                                            .swap_punch_kick = settings.swap_punch_kick,
                                            .stick_deadzone = settings.stick_deadzone,
                                            .left_handed = settings.left_handed,
+                                           .menu = &fe,
+                                           .apply_settings = apply_levels,
                                            .show_fps = settings.show_fps,
                                            .assets = &assets,
                                            .settings = &settings,
                                            .lobby_event =
                                                [room](const rr::net::Message& message) {
-                                                   room->inject(message, rr::net::steady_ms());
+                                                   room->inject(message, SDL_GetTicks());
                                                },
                                            .online = &client,
                                            .chat_messages = fe.chat_messages()},
                                           display);
                 while (auto message = client.poll_event())
                     if (!std::holds_alternative<rr::net::Start>(*message))
-                        room->inject(*message, rr::net::steady_ms());
+                        room->inject(*message, SDL_GetTicks());
                 room->resume(client.release_channel());
                 room->take_official();
                 if (sound) sound->stop_race();
@@ -578,8 +631,40 @@ int run_game(const rr::Assets& assets, SDL_Window* window, SDL_Renderer* rendere
                 g.config.spare_levels = career.spare_levels;
                 g.metric = settings.metric;
                 g.player_name = fe.player_name();
+
+                // Local splitscreen seats: the Gamepad page's Local Players
+                // setting, or Auto (0) = one per connected controller.
+                // Mano a mano always seats at least two.
+                int num_local = 1;
+                if (!ev.demo) {
+#ifdef __SWITCH__
+                    num_local = std::clamp(fe.settings().local_players, 1, 4);
+#else
+                    const int chosen = fe.settings().local_players;
+                    num_local = chosen > 0 ? chosen : std::clamp(SDL_NumJoysticks(), 1, 4);
+                    if (career.mode == rr::GameMode::mano) num_local = std::max(num_local, 2);
+                    num_local = std::clamp(num_local, 1, 4);
+#endif
+                }
+
+                if (num_local > 1) {
+                    g.config.net.humans.clear();
+                    for (int i = 0; i < num_local; ++i) {
+                        rr::HumanSeat hs;
+                        hs.seat = i;
+                        hs.character = 1 + (i % 8);
+                        hs.bike = -1;
+                        hs.alias = "Player " + std::to_string(i + 1);
+                        g.config.net.humans.push_back(hs);
+                    }
+                    g.config.net.ai_bikers = 2; // full field
+                    g.config.net.cars = true;
+                } else {
+                    g.config.net.humans.clear();
+                }
+
                 g.load_course(assets, exe);
-                g.career = true;
+                g.career = (num_local == 1);
                 g.quit_prompt = fe.string_slot(316);
                 g.pause_prompt = fe.string_slot(317);
                 g.restart();

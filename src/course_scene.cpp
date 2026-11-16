@@ -414,12 +414,25 @@ void CourseScene::draw_horizon(Framebuffer& fb, int32_t scroll, int32_t logical_
     if (s < 1 || fb.height() != 480 * s || fb.width() != logical_width * 2 * s)
         throw std::runtime_error("Horizon needs a wide*2s x 480s surface");
     const int32_t start = int32_t(((-int64_t(scroll) % 720) + 720) % 720);
-    fb.clear(0);
+    // Rows below the horizon start cleared (the scene draws over them).
+    for (int y = 320 * s; y < fb.height(); ++y) std::memset(fb.row(y), 0, size_t(fb.width()));
     // Centre the 720-wide source: the 4:3 picture is the centre crop.
     const int xoff = (720 - logical_width * 2) / 2;
-    for (int y = 0; y < 320 * s; ++y)
-        for (int x = 0; x < fb.width(); ++x)
-            fb.row(y)[x] = horizon_[size_t(y / s) * 720 + ((x / s + xoff + start) % 720 + 720) % 720];
+    // Same pixels as horizon_[(y/s)*720 + ((x/s + xoff + start) % 720 + 720) % 720],
+    // walked with a wrapping source index instead of two divides per pixel.
+    const int first = ((xoff + start) % 720 + 720) % 720;
+    for (int y = 0; y < 320 * s; ++y) {
+        const uint8_t* src = &horizon_[size_t(y / s) * 720];
+        uint8_t* dst = fb.row(y);
+        int idx = first, sub = 0;
+        for (int x = 0; x < fb.width(); ++x) {
+            dst[x] = src[idx];
+            if (++sub == s) {
+                sub = 0;
+                if (++idx == 720) idx = 0;
+            }
+        }
+    }
 }
 std::vector<DrawNode> CourseScene::draw_nodes(const std::vector<RouteSample>& route,
                                               const std::vector<RoadSlice>& slices, const Camera& camera,

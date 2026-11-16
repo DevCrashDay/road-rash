@@ -87,7 +87,8 @@ struct FrontendEvent {
         apply_display,
         apply_mixer,
         resume_race,
-        quit_race
+        quit_race,
+        configure_controllers
     } kind = Kind::none;
     std::string video; // path relative to the ROADRASH directory, e.g. VIDEO/START3.AVI
     int course = 0;    // 1..5
@@ -127,6 +128,7 @@ class Frontend {
     }
     // Plan 33b Task 4: button names of the connected pad (default: none connected).
     void set_pad_labels(PadLabels labels) { pad_labels_ = std::move(labels); }
+    void set_local_players(int count);
     void draw(RgbImage&, int scale = 1) const; // 640s x 480s; scale = 1 keeps today's output exactly
     void draw_net_overlay(RgbImage&, int scale) const;
     void draw_scale1(RgbImage&) const;            // original 640x480 path, bit-identical
@@ -175,6 +177,7 @@ class Frontend {
     // Back returns to the pause screen, not to Graphics Options, when entered
     // from it. Emits resume_race / quit_race (race ends with the Task 1 outcome).
     void open_pause(const RgbImage& race_frame);
+    void close_pause() { pause_open_ = false; }
     bool pause_open() const;
     int menu_width(int display_w = 0, int display_h = 0) const;
     int side_offset(int display_w = 0, int display_h = 0) const {

@@ -22,6 +22,6 @@ RUN apt-get update \
 COPY --from=build /build/rr-netd /usr/local/bin/rr-netd
 USER rrnet
 WORKDIR /data
-ENV RR_NETD_PORT=8080 RR_NETD_HTTP_PORT=8081 RR_NETD_LOG_DIR=/data/race-logs
-EXPOSE 8080 8081 40000-40099/udp
+ENV RR_NETD_PORT=8080 RR_NETD_HTTP_PORT=8081 RR_NETD_LOG_DIR=/data/race-logs RR_NETD_SWITCH_ONLY=1 RR_NETD_RTC=0
+EXPOSE 8080 8081
 CMD ["/usr/local/bin/rr-netd"]

@@ -24,11 +24,12 @@ struct FrameProfile {
         upload,
         sprites_hud,
         present,
+        dash_mix,
         count
     };
     static constexpr const char* names[count] = {"sim",    "scene_nodes", "horizon", "raster",
                                                  "grade",  "post",        "dash",    "remap",
-                                                 "upload", "sprites_hud", "present"};
+                                                 "upload", "sprites_hud", "present", "dash_mix"};
     std::array<uint64_t, count> frame_ns{};
     void add(Phase p, uint64_t ns) { frame_ns[p] += ns; }
 };

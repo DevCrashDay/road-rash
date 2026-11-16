@@ -15,10 +15,11 @@ endif()
 add_library(rr-netd-core STATIC ${CMAKE_CURRENT_LIST_DIR}/room.cpp ${CMAKE_CURRENT_LIST_DIR}/sealer.cpp)
 target_include_directories(rr-netd-core PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 target_link_libraries(rr-netd-core PUBLIC rr-net)
-# The /net/health responder uses POSIX sockets; it has its own test.
+# The /net/health + /admin responder uses POSIX sockets; it has its own test.
 if(NOT WIN32 AND NOT EMSCRIPTEN)
-    add_library(rr-netd-health STATIC ${CMAKE_CURRENT_LIST_DIR}/health_http.cpp)
+    add_library(rr-netd-health STATIC ${CMAKE_CURRENT_LIST_DIR}/health_http.cpp ${CMAKE_CURRENT_LIST_DIR}/admin_http.cpp)
     target_include_directories(rr-netd-health PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+    target_link_libraries(rr-netd-health PUBLIC rr-netd-core)
 endif()
 # Plan 33b Task 1: the daemon uses POSIX sockets/signals and is deployed on
 # Linux only; the room/sealer core and its tests build everywhere.

@@ -64,6 +64,7 @@ class CourseScene {
                                      const std::vector<RoadSlice>& slices, const Camera&, const DepthTable&,
                                      ActorEmitter actors = {}, int32_t logical_width = 320) const;
     void draw_horizon(Framebuffer&, int32_t scroll, int32_t logical_width = 320) const;
+    const std::vector<uint8_t>& horizon_bytes() const { return horizon_; }
     const std::vector<SceneryObject>& objects(uint32_t section, uint32_t local) const;
     const AnimationFrame* object_frame(uint32_t section, uint32_t local, const SceneryObject&) const;
     // Frame 2 of a slice object's family selector (BORR category 0,

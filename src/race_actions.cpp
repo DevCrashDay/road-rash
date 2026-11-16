@@ -43,15 +43,23 @@ RaceAction race_action(const SDL_Event& e, const RaceActionContext& c) {
         }
         return RaceAction::none;
     }
-    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && c.pad && e.gbutton.which == c.pad) {
+    const bool pad_match = (c.has_pad || c.pad != 0) && e.gbutton.which == c.pad;
+    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && pad_match) {
         if (c.quitting) {
             if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) return RaceAction::confirm_quit;
             return RaceAction::cancel_quit;
         }
+#ifdef __SWITCH__
+        // Single Left Joy-Con only has '-', single Right Joy-Con only has '+':
+        // allow either button to open/toggle the in-race pause menu.
+        if (e.gbutton.button == SDL_GAMEPAD_BUTTON_START || e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)
+            return c.has_menu ? RaceAction::open_pause : RaceAction::toggle_pause;
+#else
         if (e.gbutton.button == SDL_GAMEPAD_BUTTON_START)
             return c.has_menu ? RaceAction::open_pause : RaceAction::toggle_pause;
         if (e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK && c.career && !c.paused)
             return RaceAction::request_quit;
+#endif
         if (e.gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH && !c.paused && c.finished && !c.career)
             return RaceAction::restart;
         return RaceAction::none;

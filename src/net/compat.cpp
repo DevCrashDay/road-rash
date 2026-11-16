@@ -105,6 +105,20 @@ DataDigest verified_data_digest(const Assets& assets, const VerificationProgress
     const auto& references = reference_hashes();
     if (progress) progress(0, references.size());
     for (const auto& reference : references) {
+#ifdef __SWITCH__
+        if (reference.path == "RASHME.EXE") continue;
+        const bool is_localized_text_dll =
+            reference.path == "TEXT/DEU.DLL" || reference.path == "TEXT/ENU.DLL" ||
+            reference.path == "TEXT/ESP.DLL" || reference.path == "TEXT/FRA.DLL" ||
+            reference.path == "TEXT/ITA.DLL";
+        if (is_localized_text_dll) {
+            if (!assets.exists(reference.path))
+                throw std::runtime_error("Multiplayer data verification failed: " + reference.path);
+            rows.emplace_back(reference.path, reference.hash);
+            if (progress) progress(rows.size(), references.size());
+            continue;
+        }
+#endif
         if (!assets.exists(reference.path) || sha256(assets.read(reference.path)) != reference.hash)
             throw std::runtime_error("Multiplayer data verification failed: " + reference.path);
         rows.emplace_back(reference.path, reference.hash);

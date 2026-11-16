@@ -1,8 +1,10 @@
 // Plan 28 Task 4: race sprite cache + course canvas (moved from game_main.cpp).
 #pragma once
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "framebuffer_rgb.hpp"
 #include "frame_profile.hpp"
 #include "game_types.hpp"
+#include "gpu_race.hpp"
 #include "lifecycle.hpp"
 #include "post_chain.hpp"
 #include "render_threads.hpp"
@@ -54,9 +57,16 @@ struct SpriteCache {
 };
 
 struct CourseCanvas {
+#ifdef __SWITCH__
+    Framebuffer frame{1, 1};
+    std::vector<uint8_t> rgba;
+    int scale_w = 0, scale_h = 0;
+    std::shared_ptr<GpuRaceRenderer> gpu;
+#else
     Framebuffer frame{640, 480};
     std::vector<uint8_t> rgba = std::vector<uint8_t>(640 * 480 * 4);
     int scale_w = 640, scale_h = 480; // plan 19 Task 4: 640s x 480s surface
+#endif
     int wide_w = 320;                 // plan 21 Task 8: logical width of the surface
     TexturePtr texture;
     FrameProfile* profile = nullptr;   // --bench phase timings (null: off)
@@ -85,6 +95,7 @@ struct CourseCanvas {
     // dashboard map (replaces the per-pixel 255-entry search). Reset when
     // the palette generation changes.
     DashLut dash_lut;
+    std::vector<DashLut> dash_luts; // one per render band (dash composite)
     uint32_t dash_lut_gen = 0;
     uint8_t dash_index(uint32_t c, const Palette& pal) { return dash_lut.index(c, pal); }
     // Presented palette: the course palette through a race fade/countdown
@@ -134,8 +145,14 @@ struct CourseCanvas {
         });
     }
     void draw(SDL_Renderer* renderer, const Game& game, const std::vector<RoadSlice>& slices, int s,
-              int threads) {
+              int threads, bool present = true) {
         const int32_t wide = game.logical_width();
+#ifdef __SWITCH__
+        if (gpu) {
+            if (gpu->draw(renderer, this, game, slices, s, wide, scale, texture, profile, present))
+                return;
+        }
+#endif
         resize(s, wide);
         // Hor+ (plan 21 Task 8): road slices (project_road) and every scene
         // builder centre at wide/2, so nodes are already in wide coordinates;
@@ -312,54 +329,88 @@ struct CourseCanvas {
                                           game.enhancements.perspective);
             }
             if (need_dash) {
+                ProfileScope dash_mix_scope(profile, FrameProfile::dash_mix);
                 // Plan 19 Task 8: the dashboard composes at the race scale. Its
                 // RgbImage pixels are palette-mapped into the indexed frame.
                 // Centred 4:3 dashboard (plan 21 Task 8): offset by the side
                 // margin so it sits in the middle of the wide frame.
                 const int xoff = margin * 2 * s;
+                // Many thin bands: the dashboard sits in the bottom third, so
+                // one band per worker would hand all of it to a single thread.
+                const int bands = workers->count() > 1 ? workers->count() * 8 : 1;
+                if (dash_luts.size() < size_t(bands)) dash_luts.resize(size_t(bands));
                 const uint32_t gen = palette_generation(game.palette);
                 if (gen != dash_lut_gen) {
-                    dash_lut.reset();
+                    for (auto& l : dash_luts) l.reset();
                     dash_lut_gen = gen;
                 }
-                for (int y = 0; y < dash.height && y < frame.height(); ++y)
-                    for (int x = 0; x < dash.width && x + xoff < frame.width(); ++x) {
-                        const uint32_t c = dash.at(x, y);
-                        if (c == 0x01000000) continue;
-                        frame.row(y)[x + xoff] = dash_index(c, game.palette);
-                    }
-                // Side panels: stretched + darkened edge columns (generated at
-                // runtime from the user's own dash art, no shipped assets).
-                // Full-width margins on both sides (not half width).
-                if (margin > 0) {
-                    const int panel_w = margin * 2 * s;
-                    for (int y = 0; y < dash.height && y < frame.height(); ++y) {
-                        const uint32_t lc = dash.at(0, y), rc = dash.at(dash.width - 1, y);
-                        if (lc == 0x01000000 && rc == 0x01000000) continue;
-                        for (int x = 0; x < panel_w; ++x) {
-                            if (lc != 0x01000000) {
-                                const int r = int((lc >> 16) & 0xff) / 2, gg = int((lc >> 8) & 0xff) / 2,
-                                          bb = int(lc & 0xff) / 2;
-                                const uint32_t dark =
-                                    (uint32_t(r) << 16) | (uint32_t(gg) << 8) | uint32_t(bb);
-                                frame.row(y)[x] = dash_index(dark, game.palette);
-                            }
-                            if (rc != 0x01000000) {
-                                const int r = int((rc >> 16) & 0xff) / 2, gg = int((rc >> 8) & 0xff) / 2,
-                                          bb = int(rc & 0xff) / 2;
-                                const uint32_t dark =
-                                    (uint32_t(r) << 16) | (uint32_t(gg) << 8) | uint32_t(bb);
-                                frame.row(y)[xoff + dash.width + x] = dash_index(dark, game.palette);
-                            }
+                const int dash_rows = std::min(dash.height, frame.height());
+                const int cols = std::min(dash.width, frame.width() - xoff);
+                const int panel_w = margin * 2 * s;
+                constexpr uint32_t clear_px = 0x01000000u;
+                // Performance (identical output): rows are independent, so the
+                // bands run on the render pool, each with its own exact colour
+                // cache; a branch-free OR test skips fully transparent rows
+                // (most of the 480) before any per-pixel mapping.
+                auto band = [&](int b, int top, int bottom) {
+                    DashLut& dl = dash_luts[size_t(b)];
+                    for (int y = top; y <= bottom; ++y) {
+                        const uint32_t* src = dash.pixels.data() + size_t(y) * size_t(dash.width);
+                        uint32_t any = 0;
+                        for (int x = 0; x < dash.width; ++x) any |= src[x] ^ clear_px;
+                        if (!any) continue;
+                        uint8_t* dst = frame.row(y);
+                        for (int x = 0; x < cols; ++x) {
+                            const uint32_t c = src[x];
+                            if (c != clear_px) dst[x + xoff] = dl.index(c, game.palette);
+                        }
+                        // Side panels: stretched + darkened edge columns (generated at
+                        // runtime from the user's own dash art, no shipped assets).
+                        // Full-width margins on both sides (not half width).
+                        if (margin <= 0) continue;
+                        const uint32_t lc = src[0], rc = src[dash.width - 1];
+                        auto darken = [](uint32_t c) {
+                            const int r = int((c >> 16) & 0xff) / 2, gg = int((c >> 8) & 0xff) / 2,
+                                      bb = int(c & 0xff) / 2;
+                            return (uint32_t(r) << 16) | (uint32_t(gg) << 8) | uint32_t(bb);
+                        };
+                        if (lc != clear_px) {
+                            const uint8_t li = dl.index(darken(lc), game.palette);
+                            for (int x = 0; x < panel_w; ++x) dst[x] = li;
+                        }
+                        if (rc != clear_px) {
+                            const uint8_t ri = dl.index(darken(rc), game.palette);
+                            for (int x = 0; x < panel_w; ++x) dst[xoff + dash.width + x] = ri;
                         }
                     }
-                }
+                };
+                if (bands > 1)
+                    workers->run(bands, dash_rows, band);
+                else
+                    band(0, 0, dash_rows - 1);
             }
             ProfileScope ps(profile, FrameProfile::remap);
-            frame.to_rgba(remap ? shown_palette(game.palette, lut) : game.palette, rgba.data(), scale_w * 4);
+            // Performance (identical bytes to Framebuffer::to_rgba): one
+            // 32-bit store per pixel from a 256-entry table, rows on the pool.
+            {
+                const Palette& pal = remap ? shown_palette(game.palette, lut) : game.palette;
+                uint32_t table[256];
+                for (int i = 0; i < 256; ++i) {
+                    const uint8_t* c = &pal.rgbx[size_t(4 * i)];
+                    const uint8_t px[4] = {c[0], c[1], c[2], 255};
+                    std::memcpy(&table[i], px, 4);
+                }
+                rows([&](int y) {
+                    const uint8_t* src = frame.row(y);
+                    uint32_t* dst = reinterpret_cast<uint32_t*>(rgba.data() + size_t(y) * size_t(scale_w) * 4);
+                    for (int x = 0; x < scale_w; ++x) dst[x] = table[src[x]];
+                });
+            }
         }
         ProfileScope upload_scope(profile, FrameProfile::upload);
-        if (!texture || texture_is_rgb != use_rgb) {
+        int tex_access = -1;
+        if (texture) SDL_QueryTexture(texture.get(), nullptr, &tex_access, nullptr, nullptr);
+        if (!texture || texture_is_rgb != use_rgb || tex_access != SDL_TEXTUREACCESS_STREAMING) {
             texture.reset(SDL_CreateTexture(renderer,
                                             use_rgb ? SDL_PIXELFORMAT_ARGB8888 : SDL_PIXELFORMAT_RGBA32,
                                             SDL_TEXTUREACCESS_STREAMING, scale_w, scale_h));
@@ -374,6 +425,7 @@ struct CourseCanvas {
             throw std::runtime_error(SDL_GetError());
         // Hor+ (plan 21 Task 8): logical presentation is wide*2 x 480,
         // set once per resize below; the texture fills it exactly.
+        if (!present) return;
         const SDL_FRect dst{0, 0, float(scale_w), float(scale_h)};
         SDL_SetRenderLogicalPresentation(renderer, float(scale_w), float(scale_h),
                                          SDL_LOGICAL_PRESENTATION_LETTERBOX);

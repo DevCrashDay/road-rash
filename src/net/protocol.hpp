@@ -29,7 +29,7 @@ inline constexpr int max_room_list = 32;
 using SeatToken = std::array<uint8_t, 16>;
 using DataDigest = std::array<uint8_t, 32>;
 
-enum class Platform : uint8_t { unknown = 0, macos, android, web, linux_desktop, windows, bot };
+enum class Platform : uint8_t { unknown = 0, macos, android, web, linux_desktop, windows, bot, switch_nx };
 
 enum class RejectReason : uint8_t {
     protocol = 1, // protocol version differs

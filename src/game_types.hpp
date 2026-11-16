@@ -127,6 +127,7 @@ struct Game {
     std::vector<DrawNode> rider_nodes(const RoadSlice& near, const RoadSlice& far, int road, int32_t ceiling,
                                       bool back) const;
     void tick(uint32_t controls);
+    void tick(const std::vector<uint32_t>& controls);
     void sync_actor_states();
     void present_online(const RaceInstance&, int seat);
 };

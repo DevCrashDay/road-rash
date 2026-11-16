@@ -11,6 +11,7 @@ namespace rr {
 enum class DisplayMode : uint8_t { windowed = 0, fullscreen = 1 };    // fullscreen = borderless desktop
 enum class ScaleMode : uint8_t { fit = 0, integer = 1, stretch = 2 }; // letterbox, whole multiples, fill
 enum class FilterMode : uint8_t { sharp = 0, smooth = 1 };            // nearest, linear
+enum class SplitLayout : uint8_t { horizontal = 0, vertical = 1 };
 enum class Widescreen : uint8_t {
     off = 0,
     mode16x10 = 1,
@@ -52,6 +53,8 @@ struct Settings {
     bool swap_punch_kick = false;         // plan 18 Task 7: native gamepad page
     int stick_deadzone = 37;              // plan 18 Task 7: percent, 10..40 (≈ legacy 12000 units)
     bool left_handed = false;             // plan 18 Task 7: native touch page
+    int local_players = 0;                // splitscreen: 0 auto (one per pad), 1..4 fixed
+    SplitLayout split_layout = SplitLayout::horizontal;
     // "Mixer" block (0x00463030): master 100, other channels 80 by default.
     int master_volume = 100, music_volume = 80, effects_volume = 80, engine_volume = 80, others_volume = 80,
         siren_volume = 80, interface_volume = 80;

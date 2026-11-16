@@ -1070,7 +1070,9 @@ std::optional<DrawNode> traffic_car_node(const Vehicle& vehicle, const TrafficCa
                                          int32_t ceiling, int32_t logical_width, int32_t blend_position_q8,
                                          int32_t blend_lateral_q8, bool use_blend) {
     if (vehicle.playback.size() != 3) return std::nullopt;
-    const int64_t distance = std::abs(int64_t(car.position) - camera_q8);
+    const int32_t pos_q8 = use_blend ? blend_position_q8 : car.position;
+    const int32_t lat_q8 = use_blend ? blend_lateral_q8 : car.lateral;
+    const int64_t distance = std::abs(int64_t(pos_q8) - camera_q8);
     const size_t code = distance > 0xa00 && vehicle.playback[2]   ? 2
                         : distance > 0x500 && vehicle.playback[1] ? 1
                                                                   : 0;
@@ -1078,8 +1080,6 @@ std::optional<DrawNode> traffic_car_node(const Vehicle& vehicle, const TrafficCa
     if (!sequence || sequence->empty()) return std::nullopt;
     const auto& a = near.road[road];
     const auto& b = far.road[road];
-    const int32_t pos_q8 = use_blend ? blend_position_q8 : car.position;
-    const int32_t lat_q8 = use_blend ? blend_lateral_q8 : car.lateral;
     ActorOrientation orientation;
     orientation.depth = near.depth;
     orientation.position = pos_q8;

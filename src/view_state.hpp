@@ -22,6 +22,10 @@ struct ViewState {
 };
 class TrafficSystem;
 void capture_view(ViewState&, const Race&, const TrafficSystem*);
+// Splitscreen: the view a human seat draws from race.presentation_copy(seat)
+// (the seat's rider in row zero, its own camera). Rider ids follow that row
+// swap so blend_pose() lookups made on the copy find the right rider.
+void capture_seat_view(ViewState&, const Race&, const TrafficSystem*, int seat);
 void blend_view(ViewState& out, const ViewState& a, const ViewState& b, uint32_t alpha_q16,
                 uint32_t teleport_q8 = 8 << 8);
 // Correction-only smoothing: affects remote human poses, never the local

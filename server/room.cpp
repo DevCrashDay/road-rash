@@ -21,12 +21,37 @@ std::string json_escape(const std::string& s) {
     return o;
 }
 
+const char* platform_name(net::Platform p) {
+    switch (p) {
+    case net::Platform::unknown: return "unknown";
+    case net::Platform::macos: return "macos";
+    case net::Platform::android: return "android";
+    case net::Platform::web: return "web";
+    case net::Platform::linux_desktop: return "linux";
+    case net::Platform::windows: return "windows";
+    case net::Platform::bot: return "bot";
+    case net::Platform::switch_nx: return "switch_nx";
+    }
+    return "invalid";
+}
+
+std::string hex64(uint64_t v) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string out(16, '0');
+    for (int i = 15; i >= 0; --i) {
+        out[size_t(i)] = digits[v & 0xf];
+        v >>= 4;
+    }
+    return out;
+}
+
 } // namespace
 
 Server::Server(ServerConfig cfg) : cfg_(cfg), rng_(cfg.seed ? cfg.seed : std::random_device{}()) {}
 Server::~Server() = default;
 
 Server::ConnId Server::add_connection(std::unique_ptr<net::Channel> ch, uint64_t now) {
+    last_now_ms_ = now;
     const ConnId id = next_id_++;
     Conn& c = conns_[id];
     c.id = id;
@@ -53,21 +78,27 @@ int Server::player_count() const {
 }
 
 void Server::emit(const std::string& event, const std::string& fields) {
-    if (log) log("{\"event\":\"" + event + "\"" + (fields.empty() ? "" : "," + fields) + "}");
+    const std::string body = "{\"event\":\"" + event + "\"" + (fields.empty() ? "" : "," + fields) + "}";
+    if (events_.size() >= 200) events_.pop_front();
+    events_.push_back(ServerEvent{last_now_ms_, event, body});
+    if (log) log(body);
 }
 
 std::string Server::health_json(uint64_t) const {
     size_t rtc_open = 0;
     for (const auto& [id, c] : conns_) rtc_open += c.reliable->transport_stats().rtc_open;
     std::ostringstream o;
-    o << "{\"rtc_connections\":" << rtc_open << ",\"ok\":true,\"rooms\":" << rooms_.size()
+    o << "{\"rtc_connections\":" << rtc_open << ",\"ok\":true,\"switch_only\":"
+      << (cfg_.switch_only ? "true" : "false") << ",\"maintenance_mode\":"
+      << (cfg_.maintenance_mode ? "true" : "false") << ",\"rooms\":" << rooms_.size()
       << ",\"connections\":" << conns_.size() << ",\"players\":" << player_count()
       << ",\"races_started\":" << counters_.races_started
       << ",\"races_finished\":" << counters_.races_finished << ",\"late_inputs\":" << counters_.late_inputs
       << ",\"desyncs\":" << counters_.desyncs << ",\"malformed\":" << counters_.malformed
       << ",\"rate_limited\":" << counters_.rate_limited << ",\"reconnects\":" << counters_.reconnects
       << ",\"invalid\":" << counters_.invalid << ",\"fanout_limited\":" << counters_.fanout_limited
-      << ",\"wrong_seat_inputs\":" << counters_.wrong_seat_inputs;
+      << ",\"wrong_seat_inputs\":" << counters_.wrong_seat_inputs
+      << ",\"blocked_non_switch\":" << counters_.blocked_non_switch;
     // Public rooms for the web launcher, which does not speak the binary
     // protocol. Same entries a RoomList gets, without the build filter, so
     // nothing here is more than any connected client can already list.
@@ -183,6 +214,7 @@ bool Server::allow_fanout(Conn& c, uint64_t now) {
 }
 
 void Server::step(uint64_t now) {
+    last_now_ms_ = now;
     for (auto& [id, c] : conns_) {
         net::Channel* channels[2] = {c.reliable.get(), c.unreliable.get()};
         for (net::Channel* ch : channels) {
@@ -345,6 +377,14 @@ void Server::on_hello(Conn& c, const net::Hello& h, uint64_t now) {
         reject(c, net::RejectReason::bad_request);
         return;
     }
+    if (cfg_.switch_only && h.platform != net::Platform::switch_nx) {
+        ++counters_.blocked_non_switch;
+        emit("blocked_platform", "\"conn\":" + std::to_string(c.id) + ",\"platform\":\"" +
+                                     platform_name(h.platform) + "\",\"alias\":\"" + json_escape(h.alias) + "\"");
+        reject(c, net::RejectReason::protocol);
+        c.closing = true;
+        return;
+    }
     c.hello = true;
     c.info = h;
     emit("hello", "\"conn\":" + std::to_string(c.id) + ",\"platform\":" + std::to_string(int(h.platform)) +
@@ -386,7 +426,8 @@ void Server::on_hello(Conn& c, const net::Hello& h, uint64_t now) {
 
 void Server::on_create(Conn& c, const net::RoomCreate& m, uint64_t now) {
     if (!c.room.empty()) return reject(c, net::RejectReason::bad_request);
-    if (int(rooms_.size()) >= cfg_.max_rooms) return reject(c, net::RejectReason::server_full);
+    if (cfg_.maintenance_mode || int(rooms_.size()) >= cfg_.max_rooms)
+        return reject(c, net::RejectReason::server_full);
     Room r;
     r.code = new_code();
     r.options = m.options;
@@ -802,6 +843,178 @@ void Server::broadcast_state(Room& r) {
     st.your_seat = 0xff;
     for (ConnId id : r.spectators)
         if (auto it = conns_.find(id); it != conns_.end()) send(it->second, st);
+}
+
+std::string Server::admin_state_json(uint64_t now_ms) const {
+    static constexpr const char* status_names[] = {"lobby", "full", "racing"};
+    static constexpr const char* outcome_names[] = {"", "racing", "won", "finished", "busted", "wrecked", "left"};
+    std::ostringstream o;
+    o << "{\"ok\":true,\"now_ms\":" << now_ms << ",\"config\":{"
+      << "\"switch_only\":" << (cfg_.switch_only ? "true" : "false")
+      << ",\"maintenance_mode\":" << (cfg_.maintenance_mode ? "true" : "false")
+      << ",\"min_humans\":" << cfg_.min_humans
+      << ",\"max_rooms\":" << cfg_.max_rooms
+      << ",\"max_connections\":" << cfg_.max_connections
+      << ",\"lobby_timeout_ms\":" << cfg_.lobby_timeout_ms
+      << ",\"reconnect_window_ms\":" << cfg_.reconnect_window_ms
+      << ",\"load_ms\":" << cfg_.load_ms << "},\"counters\":{"
+      << "\"connections\":" << counters_.connections
+      << ",\"active_connections\":" << conns_.size()
+      << ",\"active_players\":" << player_count()
+      << ",\"active_rooms\":" << rooms_.size()
+      << ",\"rooms_created\":" << counters_.rooms_created
+      << ",\"races_started\":" << counters_.races_started
+      << ",\"races_finished\":" << counters_.races_finished
+      << ",\"desyncs\":" << counters_.desyncs
+      << ",\"late_inputs\":" << counters_.late_inputs
+      << ",\"malformed\":" << counters_.malformed
+      << ",\"rate_limited\":" << counters_.rate_limited
+      << ",\"reconnects\":" << counters_.reconnects
+      << ",\"invalid\":" << counters_.invalid
+      << ",\"fanout_limited\":" << counters_.fanout_limited
+      << ",\"wrong_seat_inputs\":" << counters_.wrong_seat_inputs
+      << ",\"blocked_non_switch\":" << counters_.blocked_non_switch
+      << ",\"admin_kicks\":" << counters_.admin_kicks
+      << ",\"admin_closed_rooms\":" << counters_.admin_closed_rooms << "},\"connections\":[";
+    bool first_c = true;
+    for (const auto& [id, c] : conns_) {
+        if (!first_c) o << ',';
+        first_c = false;
+        o << "{\"id\":" << id << ",\"hello\":" << (c.hello ? "true" : "false")
+          << ",\"platform\":\"" << (c.hello ? platform_name(c.info.platform) : "pending") << "\""
+          << ",\"alias\":\"" << json_escape(c.info.alias) << "\""
+          << ",\"room\":\"" << json_escape(c.room) << "\""
+          << ",\"seat\":" << c.seat
+          << ",\"rtt_ms\":" << c.rtt_ms
+          << ",\"age_ms\":" << (now_ms >= c.connected_ms ? now_ms - c.connected_ms : 0)
+          << ",\"idle_ms\":" << (now_ms >= c.last_rx_ms ? now_ms - c.last_rx_ms : 0)
+          << ",\"strikes\":" << c.bucket.strikes << "}";
+    }
+    o << "],\"rooms\":[";
+    bool first_r = true;
+    for (const auto& [code, r] : rooms_) {
+        if (!first_r) o << ',';
+        first_r = false;
+        const net::RoomListEntry entry = list_entry(code, r);
+        o << "{\"code\":\"" << code << "\",\"public\":" << (r.options.is_public ? "true" : "false")
+          << ",\"status\":\"" << status_names[int(entry.status)] << "\""
+          << ",\"level\":" << int(r.options.level) << ",\"ai\":" << int(r.options.ai)
+          << ",\"cars\":" << (r.options.cars ? "true" : "false")
+          << ",\"host_seat\":" << r.host << ",\"humans\":" << int(entry.humans)
+          << ",\"spectators\":" << r.spectators.size()
+          << ",\"fingerprint\":\"" << hex64(r.sim_fingerprint) << "\""
+          << ",\"age_ms\":" << (now_ms >= r.created_ms ? now_ms - r.created_ms : 0);
+        if (r.race) {
+            o << ",\"race\":{\"id\":" << r.race->start.race_id << ",\"course\":" << int(r.race->start.course)
+              << ",\"sealed_tick\":" << r.race->sealer->sealed_tick()
+              << ",\"desync_ticks\":" << r.race->record.desync_ticks.size() << "}";
+        } else {
+            o << ",\"race\":null";
+        }
+        o << ",\"seats\":[";
+        bool first_s = true;
+        for (int s = 0; s < net::max_seats; ++s) {
+            const Seat& seat = r.seats[size_t(s)];
+            if (!seat.occupied) continue;
+            if (!first_s) o << ',';
+            first_s = false;
+            uint16_t ping = 0;
+            if (auto it = conns_.find(seat.conn); seat.conn && it != conns_.end()) ping = it->second.rtt_ms;
+            o << "{\"seat\":" << s << ",\"conn\":" << seat.conn
+              << ",\"connected\":" << (seat.conn != 0 ? "true" : "false")
+              << ",\"ready\":" << (seat.ready ? "true" : "false")
+              << ",\"character\":" << int(seat.character)
+              << ",\"vote\":" << int(seat.vote)
+              << ",\"ping_ms\":" << ping
+              << ",\"outcome\":\"" << outcome_names[int(seat.outcome)] << "\""
+              << ",\"alias\":\"" << json_escape(seat.alias) << "\"}";
+        }
+        o << "]}";
+    }
+    o << "],\"events\":[";
+    bool first_e = true;
+    for (auto it = events_.rbegin(); it != events_.rend(); ++it) {
+        if (!first_e) o << ',';
+        first_e = false;
+        o << "{\"ts_ms\":" << it->ts_ms << ",\"kind\":\"" << json_escape(it->kind) << "\",\"data\":" << it->json
+          << "}";
+    }
+    o << "]}";
+    return o.str();
+}
+
+bool Server::admin_kick_connection(ConnId id, uint64_t now_ms) {
+    last_now_ms_ = now_ms;
+    auto it = conns_.find(id);
+    if (it == conns_.end()) return false;
+    reject(it->second, net::RejectReason::kicked);
+    it->second.closing = true;
+    ++counters_.admin_kicks;
+    emit("admin_kick", "\"conn\":" + std::to_string(id) + ",\"alias\":\"" +
+                           json_escape(it->second.info.alias) + "\"");
+    return true;
+}
+
+bool Server::admin_close_room(const std::string& code, uint64_t now_ms) {
+    last_now_ms_ = now_ms;
+    auto it = rooms_.find(code);
+    if (it == rooms_.end()) return false;
+    Room& r = it->second;
+    for (Seat& s : r.seats) {
+        if (s.conn) {
+            if (auto cit = conns_.find(s.conn); cit != conns_.end()) {
+                cit->second.room.clear();
+                cit->second.seat = -1;
+                reject(cit->second, net::RejectReason::kicked);
+            }
+        }
+    }
+    for (ConnId id : r.spectators) {
+        if (auto cit = conns_.find(id); cit != conns_.end()) {
+            cit->second.room.clear();
+            cit->second.seat = -1;
+            reject(cit->second, net::RejectReason::kicked);
+        }
+    }
+    rooms_.erase(it);
+    ++counters_.admin_closed_rooms;
+    emit("admin_close_room", "\"room\":\"" + json_escape(code) + "\"");
+    return true;
+}
+
+bool Server::admin_broadcast_room(const std::string& code, const std::string& text, uint64_t now_ms) {
+    last_now_ms_ = now_ms;
+    auto it = rooms_.find(code);
+    if (it == rooms_.end()) return false;
+    std::string clean;
+    for (unsigned char ch : text) {
+        if (ch >= 0x20 && ch < 0x7f) clean.push_back(char(ch));
+        if (clean.size() >= net::max_chat_text) break;
+    }
+    if (clean.empty()) return false;
+    Room& r = it->second;
+    const int32_t tick = r.race ? r.race->sealer->sealed_tick() : -1;
+    const net::ChatRelay relay{uint8_t(r.host), tick, clean};
+    for (const Seat& s : r.seats)
+        if (s.occupied && s.conn)
+            if (auto cit = conns_.find(s.conn); cit != conns_.end()) send(cit->second, relay);
+    for (ConnId id : r.spectators)
+        if (auto cit = conns_.find(id); cit != conns_.end()) send(cit->second, relay);
+    emit("admin_broadcast", "\"room\":\"" + json_escape(code) + "\",\"text\":\"" + json_escape(clean) + "\"");
+    return true;
+}
+
+void Server::admin_update_config(const AdminConfigPatch& patch, uint64_t now_ms) {
+    last_now_ms_ = now_ms;
+    if (patch.switch_only) cfg_.switch_only = *patch.switch_only;
+    if (patch.maintenance_mode) cfg_.maintenance_mode = *patch.maintenance_mode;
+    if (patch.min_humans) cfg_.min_humans = std::clamp(*patch.min_humans, 1, net::max_seats);
+    if (patch.max_rooms) cfg_.max_rooms = std::clamp(*patch.max_rooms, 1, 5000);
+    emit("admin_config",
+         std::string("\"switch_only\":") + (cfg_.switch_only ? "true" : "false") +
+             ",\"maintenance_mode\":" + (cfg_.maintenance_mode ? "true" : "false") +
+             ",\"min_humans\":" + std::to_string(cfg_.min_humans) +
+             ",\"max_rooms\":" + std::to_string(cfg_.max_rooms));
 }
 
 } // namespace rr::netd

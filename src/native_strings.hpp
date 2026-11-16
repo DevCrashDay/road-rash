@@ -152,6 +152,19 @@ enum : int {
     d_net_lobby,
     net_unofficial,
     d_net_host,
+    local_players,
+    players_auto,
+    players_1,
+    players_2,
+    players_3,
+    players_4,
+    d_local_players,
+    split_layout,
+    split_horizontal,
+    split_vertical,
+    d_split_layout,
+    controllers,
+    d_controllers,
     count
 };
 }

@@ -3,7 +3,9 @@
 // request split across polls is answered, other paths get 404, and the body
 // is built only when a request needs it.
 #include "check.hpp"
+#include "admin_http.hpp"
 #include "health_http.hpp"
+#include "room.hpp"
 
 #include <chrono>
 #include <csignal>
@@ -134,6 +136,59 @@ int main() {
     http.poll(now + 5000, body);
     check.eq(http.pending(), HealthHttp::max_pending, "pending sockets capped");
     for (int fd : flood) ::close(fd);
+
+    // Admin HTTP router & Web Console auth checks.
+    {
+        rr::netd::Server srv({});
+        rr::netd::AdminRouterConfig acfg;
+        acfg.admin_token = "secret-nx-token";
+        acfg.git_revision = "testrev";
+
+        HealthHttp admin_http("127.0.0.1", 0);
+        check(admin_http.ok(), "admin http listens");
+        auto pump = [&](int fd, const std::string& req) {
+            put(fd, req);
+            settle();
+            admin_http.poll_http(now + 6000, [&](const rr::netd::HttpRequest& r) {
+                return rr::netd::handle_http_request(r, srv, now + 6000, acfg);
+            });
+            return read_all(fd);
+        };
+
+        int f1 = connect_to(admin_http.port());
+        check(pump(f1, "GET /admin HTTP/1.0\r\n\r\n").find("Road Rash NX Admin") != std::string::npos,
+              "GET /admin serves Web UI");
+        ::close(f1);
+
+        int f2 = connect_to(admin_http.port());
+        check(pump(f2, "GET /admin/api/state HTTP/1.0\r\n\r\n").rfind("HTTP/1.0 401 Unauthorized", 0) == 0,
+              "unauthenticated /admin/api/state returns 401");
+        ::close(f2);
+
+        int f3 = connect_to(admin_http.port());
+        const std::string login_body = "{\"token\":\"secret-nx-token\"}";
+        const std::string login_res =
+            pump(f3, "POST /admin/api/login HTTP/1.0\r\nContent-Length: " + std::to_string(login_body.size()) +
+                         "\r\n\r\n" + login_body);
+        check(login_res.rfind("HTTP/1.0 200 OK", 0) == 0 &&
+                  login_res.find("Set-Cookie: rr_admin=secret-nx-token") != std::string::npos,
+              "login sets cookie");
+        ::close(f3);
+
+        int f4 = connect_to(admin_http.port());
+        const std::string st_res =
+            pump(f4, "GET /admin/api/state HTTP/1.0\r\nAuthorization: Bearer secret-nx-token\r\n\r\n");
+        check(st_res.rfind("HTTP/1.0 200 OK", 0) == 0 &&
+                  st_res.find("\"rev\":\"testrev\"") != std::string::npos,
+              "authorized /admin/api/state returns JSON");
+        ::close(f4);
+
+        int f5 = connect_to(admin_http.port());
+        const std::string trav = pump(
+            f5, "GET /admin/api/logs/../etc/passwd HTTP/1.0\r\nAuthorization: Bearer secret-nx-token\r\n\r\n");
+        check(trav.rfind("HTTP/1.0 400 Bad Request", 0) == 0, "path traversal blocked");
+        ::close(f5);
+    }
 
     return check.finish("server_health");
 }

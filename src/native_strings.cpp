@@ -151,6 +151,19 @@ const std::array<std::string, ns::count - native_slot_base> kNativeStrings = {
     // Replaces ENU 295, which also asks for "a connection mechanism".
     "Host a mano-\xe0-mano game. Pick a level, the bikers, the traffic and who can join, and a character, "
     "then wait for your friends!",
+    "Local Players",
+    "Auto",
+    "1 Player",
+    "2 Players",
+    "3 Players",
+    "4 Players",
+    "Splitscreen racers on this console. Auto: one per connected controller.",
+    "Split Screen",
+    "Horizontal",
+    "Vertical",
+    "Choose how splitscreen player views are arranged.",
+    "Controllers",
+    "Open Nintendo Switch controller setup to connect 1-4 controllers.",
 };
 const std::string kEmpty;
 } // namespace

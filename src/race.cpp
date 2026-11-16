@@ -4808,18 +4808,31 @@ Race Race::presentation_copy(int seat) const {
     view.camera_back_ = seat_back_[size_t(seat)];
     view.camera_lift_ = view.camera_back_ / 3;
     view.camera_heading_ = seat_heading_[size_t(seat)];
-    const auto edges = view.edges(local, local.sample);
-    const int32_t centre = (edges.left + edges.right) / 2;
+    view.camera_x_ = seat_camera_x(local);
+    view.camera_height_ = std::max(150, local.bike.i32(0x24) + view.camera_lift_);
+    view.last_target_ = -1;
+    return view;
+}
+
+int32_t Race::seat_camera_x(const Rider& local) const {
+    const auto e = edges(local, local.sample);
+    const int32_t centre = (e.left + e.right) / 2;
     const int32_t d = div256(local.bike.i32(0x28)) - centre;
     int32_t off = d - div_pow2(d, 2);
     if (d - off >= 0xc9)
         off = d - 200;
     else if (d - off < -200)
         off = d + 200;
-    view.camera_x_ = centre + off;
-    view.camera_height_ = std::max(150, local.bike.i32(0x24) + view.camera_lift_);
-    view.last_target_ = -1;
-    return view;
+    return centre + off;
+}
+
+Camera Race::seat_view_camera(int seat) const {
+    const int rider = human_rider(seat);
+    if (rider <= 0) return camera();
+    const Rider& local = riders_[size_t(rider)];
+    const int32_t lift = seat_back_[size_t(seat)] / 3;
+    const size_t s = seat_camera(seat) >> 8;
+    return {seat_camera_x(local) - route_of(local)[s].offset, std::max(150, local.bike.i32(0x24) + lift)};
 }
 
 void Race::update_handicap() {

@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include "exe_tables.hpp"
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -321,7 +322,31 @@ RgbImage Hud::compose(const HudState& state, const PhysicsTables& physics, DashM
     bar(state.condition, 45);
     bar(state.target.empty() ? 0 : state.target_stamina, 50);
     const int dashboard_height = int(dash_art.size() / stride);
-    blit(dash_art, stride, 0, 0, stride, dashboard_height, 0, 480 - dashboard_height);
+    if (art_scale_ != scale || art_low_ != low_) {
+        // Run the original blit once onto a clear layer and keep its opaque
+        // runs; replaying them below writes exactly the same pixels.
+        RgbImage drawn = std::move(image);
+        image = RgbImage(640 * scale, 480 * scale, transparent);
+        blit(dash_art, stride, 0, 0, stride, dashboard_height, 0, 480 - dashboard_height);
+        art_spans_.clear();
+        art_pixels_.clear();
+        for (int y = 0; y < image.height; ++y)
+            for (int x = 0; x < image.width;) {
+                if (image.at(x, y) == transparent) {
+                    ++x;
+                    continue;
+                }
+                const int start = x;
+                const size_t offset = art_pixels_.size();
+                while (x < image.width && image.at(x, y) != transparent) art_pixels_.push_back(image.at(x++, y));
+                art_spans_.push_back({y, start, x - start, offset});
+            }
+        image = std::move(drawn);
+        art_scale_ = scale;
+        art_low_ = low_;
+    }
+    for (const auto& span : art_spans_)
+        std::memcpy(&image.at(span.x, span.y), &art_pixels_[span.offset], size_t(span.n) * sizeof(uint32_t));
     const auto selected_pen = pen();
     const uint32_t pen_color = selected_pen.color;
     const int pen_band = selected_pen.width * scale;
@@ -382,7 +407,7 @@ RgbImage Hud::compose(const HudState& state, const PhysicsTables& physics, DashM
     }
     return image;
 }
-uint8_t DashLut::index(uint32_t c, const Palette& pal) {
+uint8_t DashLut::lookup(uint32_t c, const Palette& pal) {
     const auto it = memo_.find(c);
     if (it != memo_.end()) return it->second;
     uint8_t best = 0;

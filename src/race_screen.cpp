@@ -1,5 +1,6 @@
 // Plan 28 Task 4: RaceScreen implementation (moved from run_race, split in two).
 #include "race_screen.hpp"
+#include <cstdio>
 #include "offline_capture.hpp"
 #include "race_caches.hpp"
 #include "race_helpers.hpp"
@@ -29,6 +30,9 @@ void DisplayDriver::apply(int logical_h) {
     int cores = SDL_GetNumLogicalCPUCores();
 #ifdef RR_WEB_BROWSER
     render_threads = 1; // Baseline browser build has no pthread workers.
+#elif defined(__SWITCH__)
+    (void)cores;
+    render_threads = 3; // SDL2 reports 1 CPU; applications own cores 0..2
 #else
     render_threads = std::max(1, std::min(8, cores - 1));
 #endif
@@ -82,12 +86,25 @@ RaceScreen::RaceScreen(Game& g, SDL_Renderer* r, const RaceOptions& opt, Display
         if (g_.quit_prompt.empty()) g_.quit_prompt = "Quit this race? Press Escape again to quit.";
         network_overlay_ = std::make_unique<NetworkOverlay>(opt_.assets);
     }
-    canvas_.scale = display_.config.texture_scale;
+#ifdef __SWITCH__
+    gpu_ = std::make_shared<GpuRaceRenderer>();
+#endif
+    for (auto& c : canvases_) {
+        c.scale = display_.config.texture_scale;
+#ifdef __SWITCH__
+        c.gpu = gpu_;
+#endif
+    }
     if (opt_.start_paused) lifecycle_.state.pause();
     touch_.set_left_handed(opt_.left_handed);
     touch_.set_phone_controls(kMobileDisplay);
-    pad_ = open_first_gamepad();
-    if (opt_.menu) opt_.menu->set_pad_labels(pad_labels(pad_.get()));
+    int num_pads = 0;
+    SDL_JoystickID* jids = SDL_GetGamepads(&num_pads);
+    for (int i = 0; i < 4; ++i) {
+        if (jids && i < num_pads) pads_[i].reset(SDL_OpenGamepad(jids[i]));
+    }
+    if (jids) SDL_free(jids);
+    if (opt_.menu) opt_.menu->set_pad_labels(pad_labels(pads_[0].get()));
     if (opt_.show_fps && opt_.assets) fps_ = std::make_unique<FpsOverlay>(*opt_.assets);
     // 0x004163d0: a fresh race (timer still at its start value) fades in.
     if (!opt_.capture && g_.countdown == countdown_ticks) fade_ = Fade::in;
@@ -103,10 +120,12 @@ RgbImage RaceScreen::pause_frame() {
 }
 
 void RaceScreen::draw_scene(FrameProfile* prof) {
-    SDL_SetRenderDrawColor(renderer_, 15, 18, 22, 255);
-    SDL_RenderClear(renderer_);
+    const int humans = opt_.online ? 1 : std::clamp(g_.race().humans(), 1, 4);
     int dw = 0, dh = 0;
     if (display_.window) SDL_GetWindowSize(display_.window, &dw, &dh);
+    if (dw <= 0) dw = 1280;
+    if (dh <= 0) dh = 720;
+
     const int race_scale = (opt_.menu || opt_.render_scale == 0) && opt_.settings
                                ? effective_render_scale(*opt_.settings, dw, dh, kMobileDisplay)
                                : opt_.render_scale;
@@ -117,20 +136,163 @@ void RaceScreen::draw_scene(FrameProfile* prof) {
         g_.enhancements = opt_.settings->enhancements;
         g_.texture_detail = opt_.settings->texture_detail;
     }
-    // Road slices centre on the same logical width as the scene builders
-    // (synced above), so road, terrain, scenery and actors line up.
-    const auto slices = project_road(g_.race().route(), g_.blend_camera_position(), g_.blend_camera(),
-                                     g_.depth, g_.logical_width());
-    if (g_.scene())
-        canvas_.draw(renderer_, g_, slices, race_scale, display_.render_threads);
-    else
-        draw_road(renderer_, slices);
-    ProfileScope sprites_scope(prof, FrameProfile::sprites_hud);
-    draw_opponents(renderer_, g_, sprites_, slices);
-    draw_bike(renderer_, g_, sprites_, slices);
-    draw_hud(renderer_, g_);
-    if (!g_.banner_message.empty() && (!g_.scene() || !g_.assets.hud))
-        draw_quit_prompt(renderer_, g_.banner_message); // asset-less fallback
+
+    if (humans <= 1) {
+        SDL_SetRenderDrawColor(renderer_, 15, 18, 22, 255);
+        SDL_RenderClear(renderer_);
+        const auto slices = project_road(g_.race().route(), g_.blend_camera_position(), g_.blend_camera(),
+                                         g_.depth, g_.logical_width());
+        if (g_.scene())
+            canvases_[0].draw(renderer_, g_, slices, race_scale, display_.render_threads, true);
+        else
+            draw_road(renderer_, slices);
+        ProfileScope sprites_scope(prof, FrameProfile::sprites_hud);
+        draw_opponents(renderer_, g_, sprites_, slices);
+        draw_bike(renderer_, g_, sprites_, slices);
+        draw_hud(renderer_, g_);
+        if (!g_.banner_message.empty() && (!g_.scene() || !g_.assets.hud))
+            draw_quit_prompt(renderer_, g_.banner_message); // asset-less fallback
+        return;
+    }
+
+    // MULTIPLAYER SPLITSCREEN: 2, 3, or 4 Players
+    SDL_SetRenderLogicalPresentation(renderer_, 0, 0, SDL_LOGICAL_PRESENTATION_DISABLED);
+    SDL_SetRenderDrawColor(renderer_, 10, 12, 16, 255);
+    SDL_RenderClear(renderer_);
+
+    struct Viewport { float x, y, w, h; };
+    std::array<Viewport, 4> vps{};
+    const bool vertical_split = opt_.settings && opt_.settings->split_layout == SplitLayout::vertical;
+    const float half_w = float(dw) / 2.0f;
+    const float half_h = float(dh) / 2.0f;
+    if (humans == 2) {
+        if (vertical_split) {
+            // Vertical split: Player 1 left, Player 2 right
+            vps[0] = { 0.0f, 0.0f, half_w - 1.0f, float(dh) };
+            vps[1] = { half_w + 1.0f, 0.0f, half_w - 1.0f, float(dh) };
+        } else {
+            // Horizontal split: Player 1 top, Player 2 bottom
+            vps[0] = { 0.0f, 0.0f, float(dw), half_h - 1.0f };
+            vps[1] = { 0.0f, half_h + 1.0f, float(dw), half_h - 1.0f };
+        }
+    } else if (humans == 3) {
+        if (vertical_split) {
+            vps[0] = { 0.0f, 0.0f, half_w - 1.0f, float(dh) };
+            vps[1] = { half_w + 1.0f, 0.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[2] = { half_w + 1.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+        } else {
+            vps[0] = { 0.0f, 0.0f, float(dw), half_h - 1.0f };
+            vps[1] = { 0.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[2] = { half_w + 1.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+        }
+    } else {
+        if (vertical_split) {
+            vps[0] = { 0.0f, 0.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[1] = { 0.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[2] = { half_w + 1.0f, 0.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[3] = { half_w + 1.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+        } else {
+            vps[0] = { 0.0f, 0.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[1] = { half_w + 1.0f, 0.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[2] = { 0.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+            vps[3] = { half_w + 1.0f, half_h + 1.0f, half_w - 1.0f, half_h - 1.0f };
+        }
+    }
+
+    static const SDL_Color player_colors[4] = {
+        { 40, 120, 240, 255 }, // P1: Blue
+        { 240, 50, 50, 255 },   // P2: Red
+        { 50, 200, 70, 255 },   // P3: Green
+        { 240, 190, 40, 255 }   // P4: Yellow
+    };
+
+    const Widescreen saved_wide = g_.widescreen;
+    const int saved_dw = g_.display_w, saved_dh = g_.display_h;
+    for (int seat = 0; seat < humans; ++seat) {
+        g_.display_w = std::max(1, int(vps[seat].w));
+        g_.display_h = std::max(1, int(vps[seat].h));
+        g_.widescreen = vps[seat].w <= vps[seat].h ? Widescreen::off : saved_wide;
+        // Seats 1..3 draw from presentation_copy(seat): the seat's rider is
+        // swapped into row zero. Everything the draw reads by rider index
+        // (interpolated poses, animation states) and the interpolated camera
+        // must follow that swap, or the seat's bike is drawn with rider 0's
+        // pose and camera (drifting off centre, popping as the sample
+        // membership and the drawn pose disagree).
+        std::unique_ptr<Race> saved_race;
+        const int rider = seat > 0 ? g_.race().human_rider(seat) : 0;
+        const bool swapped = rider > 0 && size_t(rider) < g_.actor_states.size();
+        const uint64_t copy_t0 = SDL_GetTicksNS(); // PERF-PROBE
+        if (seat > 0) {
+            Race view = g_.race().presentation_copy(seat);
+            saved_race = std::move(g_.instance.race);
+            g_.instance.race = std::make_unique<Race>(std::move(view));
+            std::swap(g_.view_drawn, seat_drawn_[size_t(seat)]);
+            if (swapped) std::swap(g_.actor_states[0], g_.actor_states[size_t(rider)]);
+        }
+
+        const auto slices = project_road(g_.race().route(), g_.blend_camera_position(), g_.blend_camera(),
+                                         g_.depth, g_.logical_width());
+
+        const uint64_t canvas_t0 = SDL_GetTicksNS(); // PERF-PROBE
+        perf_copy_ns_ += canvas_t0 - copy_t0;
+        // Render scene to canvas texture without auto-presenting
+        canvases_[seat].draw(renderer_, g_, slices, 1, display_.render_threads, false);
+        perf_canvas_ns_ += SDL_GetTicksNS() - canvas_t0;
+
+        if (saved_race) {
+            if (swapped) std::swap(g_.actor_states[0], g_.actor_states[size_t(rider)]);
+            std::swap(g_.view_drawn, seat_drawn_[size_t(seat)]);
+            g_.instance.race = std::move(saved_race);
+        }
+
+        if (canvases_[seat].texture) {
+            SDL_FRect dst{ vps[seat].x, vps[seat].y, vps[seat].w, vps[seat].h };
+            SDL_RenderTexture(renderer_, canvases_[seat].texture.get(), nullptr, &dst);
+
+            // Draw player badge: e.g. "P1" in a rounded/filled badge box
+            SDL_FRect badge{ vps[seat].x + 12.0f, vps[seat].y + 12.0f, 44.0f, 24.0f };
+            const auto& col = player_colors[seat];
+            SDL_SetRenderDrawColor(renderer_, col.r, col.g, col.b, 220);
+            SDL_RenderFillRect(renderer_, &badge);
+
+            char tag[16];
+            SDL_snprintf(tag, sizeof(tag), "P%d", seat + 1);
+            SDL_SetRenderDrawColor(renderer_, 255, 255, 255, 255);
+            SDL_RenderDebugText(renderer_, vps[seat].x + 20.0f, vps[seat].y + 16.0f, tag);
+        }
+    }
+    g_.widescreen = saved_wide;
+    g_.display_w = saved_dw;
+    g_.display_h = saved_dh;
+
+    // Dividers between split screens
+    SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
+    if (humans == 2) {
+        if (vertical_split) {
+            SDL_FRect v_line{ float(dw / 2 - 1), 0.0f, 2.0f, float(dh) };
+            SDL_RenderFillRect(renderer_, &v_line);
+        } else {
+            SDL_FRect h_line{ 0.0f, float(dh / 2 - 1), float(dw), 2.0f };
+            SDL_RenderFillRect(renderer_, &h_line);
+        }
+    } else if (humans == 3) {
+        if (vertical_split) {
+            SDL_FRect v_line{ float(dw / 2 - 1), 0.0f, 2.0f, float(dh) };
+            SDL_FRect h_line{ half_w, float(dh / 2 - 1), half_w, 2.0f };
+            SDL_RenderFillRect(renderer_, &v_line);
+            SDL_RenderFillRect(renderer_, &h_line);
+        } else {
+            SDL_FRect h_line{ 0.0f, float(dh / 2 - 1), float(dw), 2.0f };
+            SDL_FRect v_line{ float(dw / 2 - 1), half_h, 2.0f, half_h };
+            SDL_RenderFillRect(renderer_, &h_line);
+            SDL_RenderFillRect(renderer_, &v_line);
+        }
+    } else {
+        SDL_FRect h_line{ 0.0f, float(dh / 2 - 1), float(dw), 2.0f };
+        SDL_FRect v_line{ float(dw / 2 - 1), 0.0f, 2.0f, float(dh) };
+        SDL_RenderFillRect(renderer_, &h_line);
+        SDL_RenderFillRect(renderer_, &v_line);
+    }
 }
 
 RaceActionContext RaceScreen::ctx_now() const {
@@ -141,9 +303,10 @@ RaceActionContext RaceScreen::ctx_now() const {
     c.paused = !opt_.online && lifecycle_.state.paused();
     c.quitting = g_.quitting;
     c.pause_message = g_.pause_message;
-    c.has_menu = !opt_.online && opt_.menu != nullptr;
-    c.menu_open = !opt_.online && opt_.menu && opt_.menu->pause_open();
-    c.pad = pad_ ? SDL_GetGamepadID(pad_.get()) : 0;
+    c.has_menu = opt_.menu != nullptr;
+    c.menu_open = opt_.menu && opt_.menu->pause_open();
+    c.has_pad = pads_[0] != nullptr;
+    c.pad = pads_[0] ? SDL_GetGamepadID(pads_[0].get()) : 0;
     return c;
 }
 
@@ -208,7 +371,7 @@ void RaceScreen::event(const SDL_Event& e) {
     // textures and pause frames are rebuilt from the new device.
     if (e.type == SDL_EVENT_RENDER_DEVICE_RESET || e.type == SDL_EVENT_RENDER_TARGETS_RESET) {
         sprites_.clear();
-        canvas_.clear();
+        for (auto& c : canvases_) c.clear();
         pause_tex_.reset();
         pause_scale_w_ = 0;
         pause_img_ = RgbImage();
@@ -218,7 +381,19 @@ void RaceScreen::event(const SDL_Event& e) {
     if (e.type == SDL_EVENT_RENDER_DEVICE_LOST) throw std::runtime_error("Render device lost");
     if (!lifecycle_event(e.type)) lifecycle_.state.handle(e);
     if (g_.mixer && !g_.mixer->handle(e)) SDL_Log("Audio reopen failed: %s", SDL_GetError());
-    const RaceActionContext act_ctx = ctx_now();
+    RaceActionContext act_ctx = ctx_now();
+#ifdef __SWITCH__
+    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+        (e.gbutton.button == SDL_GAMEPAD_BUTTON_START || e.gbutton.button == SDL_GAMEPAD_BUTTON_BACK)) {
+        for (int i = 0; i < 4; ++i) {
+            if (pads_[i] && SDL_GetGamepadID(pads_[i].get()) == e.gbutton.which) {
+                act_ctx.has_pad = true;
+                act_ctx.pad = e.gbutton.which;
+                break;
+            }
+        }
+    }
+#endif
     RaceAction act = race_action(e, act_ctx);
     if (kMobileDisplay && !act_ctx.demo && !act_ctx.menu_open && !act_ctx.paused && !act_ctx.pause_message &&
         e.type == SDL_EVENT_FINGER_DOWN) {
@@ -231,7 +406,17 @@ void RaceScreen::event(const SDL_Event& e) {
         return;
     }
     if (act_ctx.menu_open) {
-        pause_event(opt_.menu, e, pad_, renderer_);
+#ifdef __SWITCH__
+        if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+            for (int i = 0; i < 4; ++i) {
+                if (pads_[i] && SDL_GetGamepadID(pads_[i].get()) == e.gbutton.which) {
+                    pause_event(opt_.menu, e, pads_[i], renderer_);
+                    return;
+                }
+            }
+        }
+#endif
+        pause_event(opt_.menu, e, pads_[0], renderer_);
         return;
     }
     switch (act) {
@@ -286,11 +471,20 @@ void RaceScreen::event(const SDL_Event& e) {
     case RaceAction::demo_exit:
         break;
     }
-    // A removed pad pauses the race; another connected pad, or the next one
-    // plugged in, takes over.
-    if (track_gamepad(pad_, e)) lifecycle_.state.pause();
-    if (opt_.menu && (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED))
-        opt_.menu->set_pad_labels(pad_labels(pad_.get()));
+    if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+        int num_pads = 0;
+        SDL_JoystickID* jids = SDL_GetGamepads(&num_pads);
+        for (int i = 0; i < 4; ++i) {
+            if (jids && i < num_pads) {
+                if (!pads_[i] || !SDL_GamepadConnected(pads_[i].get()))
+                    pads_[i].reset(SDL_OpenGamepad(jids[i]));
+            } else {
+                pads_[i].reset();
+            }
+        }
+        if (jids) SDL_free(jids);
+        if (opt_.menu) opt_.menu->set_pad_labels(pad_labels(pads_[0].get()));
+    }
     if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION ||
         e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) {
         if (act == RaceAction::none) {
@@ -328,6 +522,7 @@ void RaceScreen::step_online(uint64_t now, uint32_t controls) {
                                                                              : RaceOutcome::lost;
                 }
             decided_ = true;
+            if (opt_.menu) opt_.menu->close_pause();
             fade_ = Fade::out;
             fade_start_ = now;
         }
@@ -344,6 +539,7 @@ void RaceScreen::step_online(uint64_t now, uint32_t controls) {
         }
     }
     if (client.failed()) {
+        if (opt_.menu) opt_.menu->close_pause();
         result_.outcome = RaceOutcome::lost;
         running_ = false;
         return;
@@ -382,11 +578,25 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     // pause menu; controllers that re-enumerated on resume are picked up.
     const bool own_freeze = g_.quitting || g_.pause_message || (opt_.menu && opt_.menu->pause_open());
     if (!opt_.capture && !opt_.bench && !opt_.online && lifecycle_.state.frame(now, own_freeze)) {
-        if (pad_ && !SDL_GamepadConnected(pad_.get())) pad_.reset();
-        if (!pad_) pad_ = open_first_gamepad();
+        int num_pads = 0;
+        SDL_JoystickID* jids = SDL_GetGamepads(&num_pads);
+        for (int i = 0; i < 4; ++i) {
+            if (jids && i < num_pads) {
+                if (!pads_[i] || !SDL_GamepadConnected(pads_[i].get()))
+                    pads_[i].reset(SDL_OpenGamepad(jids[i]));
+            } else {
+                pads_[i].reset();
+            }
+        }
+        if (jids) SDL_free(jids);
     }
+#ifdef __SWITCH__
+    perf_.frame_ns.fill(0); // PERF-PROBE
+    FrameProfile* prof = opt_.bench ? &opt_.bench->current : &perf_;
+#else
     FrameProfile* prof = opt_.bench ? &opt_.bench->current : nullptr;
-    canvas_.profile = prof;
+#endif
+    for (auto& c : canvases_) c.profile = prof;
     if (restart_) {
         g_.restart(); // Enter / pad South / tap after a quick-race finish (README)
         restart_ = false;
@@ -406,32 +616,44 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     }
     // A menu input may close pause_open() while queuing resume/quit. Drain
     // those events even after the menu has closed so the clock is reset.
-    if (!opt_.online && opt_.menu) {
+    if (opt_.menu) {
         FrontendEvent ev;
         while (opt_.menu->poll(ev)) {
             if (ev.kind == FrontendEvent::Kind::resume_race)
                 lifecycle_.state.resume();
             else if (ev.kind == FrontendEvent::Kind::quit_race) {
                 lifecycle_.state.resume();
-                if (!decided_) {
-                    result_.outcome = RaceOutcome::wrecked;
-                    result_.place = std::max(0, g_.race().place(0) - 1);
-                }
+                if (opt_.online) opt_.online->send(net::RoomLeave{});
+                end_as_quit();
                 running_ = false;
             } else if (ev.kind == FrontendEvent::Kind::apply_display)
                 display_.apply(480);
             else if (ev.kind == FrontendEvent::Kind::apply_mixer && opt_.apply_settings)
                 opt_.apply_settings();
+            else if (ev.kind == FrontendEvent::Kind::configure_controllers) {
+#ifdef __SWITCH__
+                for (auto& p : pads_) p.reset();
+                const int count = configure_switch_controllers(opt_.menu->settings().local_players);
+                opt_.menu->set_local_players(count);
+                int num_pads = 0;
+                SDL_JoystickID* jids = SDL_GetGamepads(&num_pads);
+                for (int i = 0; i < 4; ++i) {
+                    if (jids && i < num_pads) pads_[i].reset(SDL_OpenGamepad(jids[i]));
+                }
+                if (jids) SDL_free(jids);
+                opt_.menu->set_pad_labels(pad_labels(pads_[0].get()));
+#endif
+            }
         }
     }
     if (!running_) return false;
     // The pause menu's Configure Input edits the live table (the original has
     // one global 0x00465fb8), so a rebind applies on resume.
-    const bool live_table = opt_.menu && !opt_.online;
+    const bool live_table = opt_.menu != nullptr;
     const auto& key_codes = live_table ? opt_.menu->settings().controls : opt_.key_codes;
     const bool custom_keys = live_table ? opt_.menu->settings().custom_controls : opt_.custom_keys;
-    if (live_table && opt_.menu->pause_open() && pad_)
-        opt_.menu->poll_capture_joystick(joystick_capture_code(joystick_state(pad_.get())));
+    if (live_table && opt_.menu->pause_open() && pads_[0])
+        opt_.menu->poll_capture_joystick(joystick_capture_code(joystick_state(pads_[0].get())));
     PlayerInput in = touch_.current();
     const bool* keys = SDL_GetKeyboardState(nullptr);
     // Plan 18 Task 7: custom tables are honored via bound_control_bits below;
@@ -450,32 +672,48 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     // (0x0044f880); the native pad mapping below then stays off so a button
     // does not also do its native action.
     const bool joy_table = custom_keys && joystick_bound(key_codes);
-    if (pad_ && !joy_table) {
-        const auto south = SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_SOUTH);
-        const auto west = SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_WEST);
-        const auto north = SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_NORTH);
-        in.accelerate |= south || SDL_GetGamepadAxis(pad_.get(), SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
-        in.brake |= SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_EAST) ||
-                    SDL_GetGamepadAxis(pad_.get(), SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000;
-        in.left |= SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_DPAD_LEFT);
-        in.right |= SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
-        in.steer_axis = SDL_GetGamepadAxis(pad_.get(), SDL_GAMEPAD_AXIS_LEFTX);
-        in.punch |= opt_.swap_punch_kick ? north : west;
-        in.kick |= opt_.swap_punch_kick ? west : north;
-        in.backhand |= SDL_GetGamepadButton(pad_.get(), SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    const int humans = opt_.online ? 1 : std::clamp(g_.race().humans(), 1, 4);
+    std::vector<uint32_t> seat_controls(humans, 0);
+
+    for (int seat = 0; seat < humans; ++seat) {
+        PlayerInput seat_in;
+        uint32_t seat_c = 0;
+        SDL_Gamepad* cur_pad = pads_[seat].get();
+        if (cur_pad && !joy_table) {
+            const auto south = SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_SOUTH);
+            const auto west = SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_WEST);
+            const auto north = SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_NORTH);
+            seat_in.accelerate |= south || SDL_GetGamepadAxis(cur_pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 8000;
+            seat_in.brake |= SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_EAST) ||
+                             SDL_GetGamepadAxis(cur_pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 8000;
+            seat_in.left |= SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+            seat_in.right |= SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+            seat_in.steer_axis = SDL_GetGamepadAxis(cur_pad, SDL_GAMEPAD_AXIS_LEFTX);
+            const bool punch_btn = opt_.swap_punch_kick ? north : west;
+            const bool kick_btn = opt_.swap_punch_kick ? west : north;
+            seat_in.punch |= punch_btn;
+            seat_in.kick |= kick_btn;
+            seat_in.backhand |= SDL_GetGamepadButton(cur_pad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+            seat_c = controls_from(seat_in, zone);
+        } else if (cur_pad && joy_table) {
+            const auto& race = g_.race();
+            const int human = race.humans() > seat ? race.human_rider(seat) : -1;
+            const int32_t top = human >= 0 ? race.riders()[size_t(human)].bike.i32(0x260) : 0;
+            seat_c = joystick_control_bits(key_codes, joystick_state(cur_pad), joy_analogs_[seat], top);
+        }
+        if (seat == 0) {
+            if (opt_.auto_drive) seat_c = autopilot(g_.race(), g_.traffic());
+            seat_c |= controls_from(in, zone);
+            if (!opt_.auto_drive && custom_keys) {
+                const auto& race = g_.race();
+                const int human = race.humans() > 0 ? race.human_rider(0) : -1;
+                const int32_t top = human >= 0 ? race.riders()[size_t(human)].bike.i32(0x260) : 0;
+                seat_c |= bound_control_bits(key_codes, keys, joy_analogs_[0], top);
+            }
+        }
+        seat_controls[seat] = seat_c;
     }
-    uint32_t controls = opt_.auto_drive ? autopilot(g_.race(), g_.traffic()) : controls_from(in, zone);
-    if (!opt_.auto_drive && custom_keys) {
-        // 0x0044f800: keyboard rows, then the joystick rows, each writing the
-        // analog drive values with the player's +0x260 at poll time.
-        const auto& race = g_.race();
-        const int human = race.humans() > 0 ? race.human_rider(0) : -1;
-        const int32_t top = human >= 0 ? race.riders()[size_t(human)].bike.i32(0x260) : 0;
-        controls |= bound_control_bits(key_codes, keys, joy_analog_, top);
-        if (joy_table)
-            controls |= joystick_control_bits(key_codes, joystick_state(pad_.get()), joy_analog_, top);
-    }
-    g_.race().set_joystick_analog(!opt_.auto_drive && joy_table, joy_analog_.throttle, joy_analog_.steer);
+    g_.race().set_joystick_analog(!opt_.auto_drive && joy_table, joy_analogs_[0].throttle, joy_analogs_[0].steer);
 
     if (lifecycle_.state.take_clock_reset()) {
         reset_clock(now);
@@ -483,7 +721,7 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     // Plan 18 Task 8: the race loop stops stepping the simulation while
     // pause_open(); the mixer pauses race sounds but the interface levels
     // stay live so the sound sliders apply (no preview click, as in Task 6).
-    const bool menu_pause = !opt_.online && opt_.menu && opt_.menu->pause_open();
+    const bool menu_pause = opt_.menu && opt_.menu->pause_open();
     const bool frozen = !opt_.online && !opt_.capture &&
                         (lifecycle_.state.paused() || g_.quitting || g_.pause_message || menu_pause);
     if (g_.mixer) g_.mixer->pause(frozen || (!opt_.capture && lifecycle_.state.background()));
@@ -498,17 +736,25 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     const int steps = opt_.capture ? 1 : clock_.advance(now - last_, frozen);
     last_ = now;
     std::optional<ProfileScope> sim_scope(std::in_place, prof, FrameProfile::sim);
-    if (opt_.online) step_online(now, g_.quitting || lifecycle_.state.paused() ? 0 : controls);
+    if (opt_.online) step_online(now, g_.quitting || lifecycle_.state.paused() || menu_pause ? 0 : seat_controls[0]);
     for (int step = 0; step < steps && !opt_.online && !frozen && fade_ == Fade::none && running_; ++step) {
-        if (g_.view_ready) g_.view_prev = g_.view_cur; // adjacent tick snapshot
-        g_.tick(controls);
+        const bool had_view = g_.view_ready;
+        if (had_view) g_.view_prev = g_.view_cur; // adjacent tick snapshot
+        for (int seat = 1; seat < humans && had_view; ++seat) seat_prev_[size_t(seat)] = seat_cur_[size_t(seat)];
+        g_.tick(seat_controls);
         // Capture every simulation tick (even during catch-up), keeping both
         // endpoints adjacent; first tick after a reset initializes both.
         capture_view(g_.view_cur, g_.race(), g_.traffic());
+        for (int seat = 1; seat < humans; ++seat) {
+            capture_seat_view(seat_cur_[size_t(seat)], g_.race(), g_.traffic(), seat);
+            if (!had_view) seat_prev_[size_t(seat)] = seat_cur_[size_t(seat)];
+        }
         if (!g_.view_ready) g_.view_prev = g_.view_cur;
         g_.view_ready = true;
-        if (!g_.career) continue;
-        if (!decided_ && (g_.race().finished() || g_.race().wrecked() || g_.race().busted())) {
+        if (!g_.career && humans <= 1) continue;
+        const bool race_done = (humans > 1) ? g_.race().all_humans_done()
+                                            : (g_.race().finished() || g_.race().wrecked() || g_.race().busted());
+        if (!decided_ && race_done) {
             decided_ = true;
             end_ticks_ = race_end_delay;
             result_.place = std::max(0, g_.race().place(0) - 1);
@@ -530,6 +776,8 @@ bool RaceScreen::iterate(uint64_t now_ns) {
     if (!opt_.online && g_.view_ready) {
         const uint32_t alpha = g_.enhancements.interpolate && !opt_.capture ? clock_.alpha_q16() : 65536;
         blend_view(g_.view_drawn, g_.view_prev, g_.view_cur, alpha);
+        for (int seat = 1; seat < humans; ++seat)
+            blend_view(seat_drawn_[size_t(seat)], seat_prev_[size_t(seat)], seat_cur_[size_t(seat)], alpha);
     }
     if (!opt_.capture && lifecycle_.state.background()) {
         SDL_Delay(20);
@@ -605,6 +853,25 @@ bool RaceScreen::iterate(uint64_t now_ns) {
         if (!SDL_RenderPresent(renderer_)) throw std::runtime_error(SDL_GetError());
     }
     display_.maybe_toggle();
+#ifdef __SWITCH__
+    { // PERF-PROBE
+        for (size_t i = 0; i < perf_sum_.size(); ++i) perf_sum_[i] += perf_.frame_ns[i];
+        perf_total_ns_ += SDL_GetTicksNS() - now;
+        perf_steps_ += uint64_t(steps);
+        if (++perf_frames_ == 120) {
+            const double n = double(perf_frames_) * 1e6;
+            std::printf("[perf] humans=%d threads=%d frame=%.2fms ticks/frame=%.2f copy=%.2f canvas=%.2f |",
+                        g_.race().humans(), display_.render_threads, perf_total_ns_ / n,
+                        double(perf_steps_) / double(perf_frames_), perf_copy_ns_ / n, perf_canvas_ns_ / n);
+            for (int i = 0; i < FrameProfile::count; ++i)
+                std::printf(" %s=%.2f", FrameProfile::names[i], perf_sum_[size_t(i)] / n);
+            std::printf("\n");
+            std::fflush(stdout);
+            perf_sum_.fill(0);
+            perf_frames_ = perf_total_ns_ = perf_copy_ns_ = perf_canvas_ns_ = perf_steps_ = 0;
+        }
+    }
+#endif
     if (opt_.bench) {
         // Fade-in frames are skipped by the warm-up; a whole frame is
         // iterate entry to after present.

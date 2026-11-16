@@ -18,6 +18,8 @@ bool write_file_atomic(const std::filesystem::path& path, const void* data, size
     ok = std::fflush(f) == 0 && ok;
 #if defined(_WIN32)
     ok = ::_commit(::_fileno(f)) == 0 && ok;
+#elif defined(__SWITCH__)
+    (void)::fsync(::fileno(f)); // newlib/fsdev may not implement fsync; fclose commits
 #else
     ok = ::fsync(::fileno(f)) == 0 && ok;
 #endif

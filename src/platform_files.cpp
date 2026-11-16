@@ -38,6 +38,15 @@ bool rename_with_retry(const fs::path& from, const fs::path& to, std::error_code
     return false;
 #else
     fs::rename(from, to, ec);
+#if defined(__SWITCH__)
+    // Horizon's SD filesystem will not rename over an existing file.
+    if (ec && fs::exists(to)) {
+        std::error_code rm;
+        fs::remove(to, rm);
+        ec.clear();
+        fs::rename(from, to, ec);
+    }
+#endif
     return !ec;
 #endif
 }

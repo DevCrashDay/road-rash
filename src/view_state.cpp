@@ -78,6 +78,25 @@ void capture_view(ViewState& v, const Race& race, const TrafficSystem* traffic) 
     }
 }
 
+void capture_seat_view(ViewState& v, const Race& race, const TrafficSystem* traffic, int seat) {
+    capture_view(v, race, traffic);
+    const int rider = race.human_rider(seat);
+    if (rider <= 0) return;
+    const uint32_t r = uint32_t(rider);
+    v.camera_position_q8 = race.seat_camera(seat);
+    v.camera = race.seat_view_camera(seat);
+    for (auto& p : v.actors) {
+        if (p.id == 1)
+            p.id = r + 1;
+        else if (p.id == r + 1)
+            p.id = 1;
+        else if (p.id == 1000)
+            p.id = 1000 + r;
+        else if (p.id == 1000 + r)
+            p.id = 1000;
+    }
+}
+
 void blend_view(ViewState& out, const ViewState& a, const ViewState& b, uint32_t alpha_q16,
                 uint32_t teleport_q8) {
     out.tick = b.tick;

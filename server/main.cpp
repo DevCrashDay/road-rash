@@ -1,12 +1,15 @@
 // Plan 34 Task 5: rr-netd, the online mano-a-mano server. One event loop
 // thread drives rr::netd::Server; libdatachannel threads only queue new
 // connections and messages. Configuration comes from the environment:
-//   RR_NETD_PORT        WebSocket port (default 8080; Nginx proxies /net to it)
-//   RR_NETD_HTTP_PORT   plain HTTP port for GET /net/health (default 8081)
+//   RR_NETD_PORT        WebSocket port (default 8080; Nginx/Caddy proxies /net to it)
+//   RR_NETD_HTTP_PORT   plain HTTP port for /net/health + /admin (default 8081)
 //   RR_NETD_BIND        bind address (default 0.0.0.0)
 //   RR_NETD_LOG_DIR     race logs, kept 7 days (default ./race-logs)
 //   RR_NETD_MAX_ROOMS   room cap (default 500)
 //   RR_NETD_MIN_HUMANS  humans needed to start (default 2)
+//   RR_NETD_SWITCH_ONLY enforce Nintendo Switch (switch_nx) clients only (default 1)
+//   RR_NETD_ADMIN_TOKEN bearer/cookie secret enabling /admin web console & API
+#include "admin_http.hpp"
 #include "health_http.hpp"
 #include "room.hpp"
 
@@ -111,8 +114,13 @@ int main() {
     cfg.max_rooms = env_int("RR_NETD_MAX_ROOMS", cfg.max_rooms);
     cfg.min_humans = env_int("RR_NETD_MIN_HUMANS", cfg.min_humans);
     cfg.seed = uint32_t(env_int("RR_NETD_SEED", 0));
+    cfg.switch_only = env_int("RR_NETD_SWITCH_ONLY", 1) != 0;
     const std::string bind = env_str("RR_NETD_BIND", "0.0.0.0");
     const std::filesystem::path log_dir = env_str("RR_NETD_LOG_DIR", "race-logs");
+    rr::netd::AdminRouterConfig admin_cfg;
+    admin_cfg.admin_token = env_str("RR_NETD_ADMIN_TOKEN", "");
+    admin_cfg.log_dir = log_dir;
+    admin_cfg.git_revision = RR_GIT_REVISION;
     rr::net::RtcOptions rtc_options;
     rtc_options.enabled = env_int("RR_NETD_RTC", 0) != 0;
     rtc_options.server = true;
@@ -144,7 +152,9 @@ int main() {
     });
     rr::netd::HealthHttp health(bind, env_int("RR_NETD_HTTP_PORT", 8081));
     log_line(std::string("{\"event\":\"start\",\"rev\":\"") + RR_GIT_REVISION + "\",\"ws_port\":" +
-             std::to_string(ws.port()) + ",\"health\":" + (health.ok() ? "true" : "false") + "}");
+             std::to_string(ws.port()) + ",\"health\":" + (health.ok() ? "true" : "false") +
+             ",\"switch_only\":" + (cfg.switch_only ? "true" : "false") +
+             ",\"admin_enabled\":" + (admin_cfg.admin_token.empty() ? "false" : "true") + "}");
 
     using clock = std::chrono::steady_clock;
     const auto t0 = clock::now();
@@ -159,10 +169,8 @@ int main() {
             incoming.clear();
         }
         server.step(now);
-        health.poll(now, [&] {
-            std::string body = server.health_json(now);
-            body.insert(body.size() - 1, std::string(",\"rev\":\"") + RR_GIT_REVISION + "\"");
-            return body;
+        health.poll_http(now, [&](const rr::netd::HttpRequest& req) {
+            return rr::netd::handle_http_request(req, server, now, admin_cfg);
         });
         if (now >= next_prune) {
             next_prune = now + 3600 * 1000;

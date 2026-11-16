@@ -74,13 +74,13 @@ std::vector<DrawNode> Game::rider_nodes(const RoadSlice& near, const RoadSlice& 
     for (size_t i = 0; i < race().riders().size(); ++i) {
         const auto& rd = race().riders()[i];
         auto include = [&](const Bike& actor, int route, const ActorAnimationState& state, bool body) {
-            const auto pos = uint32_t(actor.i32(0x1c));
-            if ((pos >> 8) != near.sample || ((pos & 255) >= 128) != back || !state.selected) return;
-            if (near.count == 2 && route != road) return;
-            if (const auto* pose = rider_pose(i, body))
-                visible.push_back({int32_t(pose->position_q8), i, false, body});
-            else
-                visible.push_back({actor.i32(0x1c), i, false, body});
+            if (!state.selected) return;
+            const auto* pose = rider_pose(i, body);
+            const auto pos = pose ? pose->position_q8 : uint32_t(actor.i32(0x1c));
+            const int use_route = pose ? pose->route : route;
+            if ((pos >> 8) != near.sample || ((pos & 255) >= 128) != back) return;
+            if (near.count == 2 && use_route != road) return;
+            visible.push_back({int32_t(pos), i, false, body});
         };
         if (rd.crash_active) {
             include(rd.bike, rd.route, rd.crash_bike_animation, false);
@@ -91,16 +91,11 @@ std::vector<DrawNode> Game::rider_nodes(const RoadSlice& near, const RoadSlice& 
     if (instance.traffic && road == near.own)
         for (size_t i = 0; i < instance.traffic->cars().size(); ++i) {
             const auto& car = instance.traffic->cars()[i];
-            const auto pos = uint32_t(car.position);
-            if (car.active && (pos >> 8) == near.sample && ((pos & 255) >= 128) == back) {
-                if (view_ready) {
-                    if (const auto* pose = blend_pose(uint32_t(2000 + i)))
-                        visible.push_back({int32_t(pose->position_q8), i, true});
-                    else
-                        visible.push_back({car.position, i, true});
-                } else
-                    visible.push_back({car.position, i, true});
-            }
+            if (!car.active) continue;
+            const ActorPose* pose = view_ready ? blend_pose(uint32_t(2000 + i)) : nullptr;
+            const uint32_t pos = pose ? pose->position_q8 : uint32_t(car.position);
+            if ((pos >> 8) == near.sample && ((pos & 255) >= 128) == back)
+                visible.push_back({int32_t(pos), i, true});
         }
     if (instance.pedestrians && road == near.own)
         for (size_t i = 0; i < instance.pedestrians->pool().size(); ++i) {
@@ -116,7 +111,7 @@ std::vector<DrawNode> Game::rider_nodes(const RoadSlice& near, const RoadSlice& 
         const size_t i = item.index;
         if (item.pedestrian) {
             if (auto node = pedestrian_node(instance.pedestrians->pool()[i], near, far, road,
-                                            race().route().at(near.sample), race().camera(), depth, ceiling,
+                                            race().route().at(near.sample), blend_camera(), depth, ceiling,
                                             logical_width()))
                 output.push_back(*node);
             continue;
@@ -213,10 +208,17 @@ void Game::sync_actor_states() {
 }
 
 void Game::tick(uint32_t controls) {
+    tick(std::vector<uint32_t>{controls});
+}
+
+void Game::tick(const std::vector<uint32_t>& controls) {
     if (countdown > 0)
         --countdown; // race clock starts after the countdown
     else {
-        race().step(controls);
+        if (controls.size() > 1)
+            race().step(controls);
+        else
+            race().step(controls.empty() ? 0 : controls[0]);
         if (assets.actors) sync_actor_states();
         if (assets.actors)
             for (size_t i = 0; i < actor_states.size(); ++i) {
@@ -252,9 +254,19 @@ void Game::tick(uint32_t controls) {
                 input.lateral_speed = b.i32(0x100);
                 input.boost = b.i32(0xf4);
                 input.flags = b.u8(0x278);
-                input.player = i == 0;
+                // Splitscreen: each human seat's rider is that view's player
+                // (as on its own machine in a networked race), measured from
+                // its own camera; others measure from the nearest seat camera.
+                // One human: exactly the original (rider 0, its camera).
+                int player_seat = i == 0 ? 0 : -1;
+                for (int seat = 1; seat < race().humans() && player_seat < 0; ++seat)
+                    if (race().human_rider(seat) == int(i)) player_seat = seat;
+                input.player = player_seat >= 0;
                 input.wrecked = (b.u8(0xc0) & 0x10) != 0;
-                input.camera_distance = std::abs(b.i32(0x1c) - int32_t(race().camera_position()));
+                int32_t distance = std::abs(b.i32(0x1c) - int32_t(race().camera_position()));
+                for (int seat = 1; seat < race().humans(); ++seat)
+                    distance = std::min(distance, std::abs(b.i32(0x1c) - int32_t(race().seat_camera(seat))));
+                input.camera_distance = distance;
                 advance_riding_animation(state, playback, library.fallback, input, uint32_t(race().ticks()));
             }
     }
@@ -273,6 +285,9 @@ void Game::present_online(const RaceInstance& source, int seat) {
     for (const auto& rider : race().riders()) actor_states.push_back(rider.ride_animation);
 }
 std::string pref_directory() {
+#ifdef __SWITCH__
+    return "sdmc:/switch/roadrash";
+#endif
     if (const char* o = SDL_getenv("RR_PREF_OVERRIDE")) return o;
     if (std::string portable = portable_data_directory(); !portable.empty())
         return portable; // plan 33b Task 5

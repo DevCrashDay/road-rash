@@ -54,11 +54,31 @@ enum class DashMode : int { full = 0, mini = 1, off = 2 };
 // palette change. Cleared maps keep capacity: no per-frame allocation.
 class DashLut {
   public:
-    uint8_t index(uint32_t c, const Palette& pal);
-    void reset() { memo_.clear(); }
+    // Exact: a direct-mapped front cache keyed by the full colour (no
+    // quantization) answers the per-pixel hits without hashing; misses fall
+    // through to the memo and its nearest-colour search.
+    uint8_t index(uint32_t c, const Palette& pal) {
+        Slot& s = cache_[(c ^ (c >> 11) ^ (c >> 19)) & (kSlots - 1)];
+        if (s.key == c) return s.value;
+        s.key = c;
+        s.value = lookup(c, pal);
+        return s.value;
+    }
+    void reset() {
+        memo_.clear();
+        for (auto& s : cache_) s.key = kEmpty;
+    }
     size_t size() const { return memo_.size(); }
 
   private:
+    static constexpr size_t kSlots = 4096;
+    static constexpr uint32_t kEmpty = 0xffffffffu; // never a 24-bit colour
+    struct Slot {
+        uint32_t key = kEmpty;
+        uint8_t value = 0;
+    };
+    uint8_t lookup(uint32_t c, const Palette& pal);
+    std::array<Slot, kSlots> cache_{};
     std::unordered_map<uint32_t, uint8_t> memo_;
 };
 // Needle pen selected per frame from the resolution (0x00446c30:
@@ -133,6 +153,17 @@ class Hud {
     // Low-mode artwork: 320-wide KLODASH/MLODASH dashboard + 95-stride LILMETER,
     // selected in low resolution (0x004457f0 choice 1/2); MiniDash picks the stride.
     void set_low_mode(bool low);
+    bool is_low() const { return low_; }
+    bool is_metric() const { return metric_; }
+    const Palette& palette() const { return palette_; }
+    const TextRenderer& text_renderer() const { return text_; }
+    const std::vector<uint8_t>& dashboard_art() const { return low_ ? dashboard_low_ : dashboard_; }
+    int dashboard_stride() const { return low_ ? 320 : 640; }
+    const std::vector<uint8_t>& meter_art() const { return low_ ? meter_low_ : meter_; }
+    int meter_stride() const { return low_ ? 95 : 190; }
+    const std::array<int32_t, 55>& layout(DashMode mode = DashMode::full) const {
+        return mode == DashMode::mini ? layout_mini_ : layout_;
+    }
     static int meter_level(int current, int base);
     static int numeric_speed(int32_t velocity, bool metric);
     static int cycle_mini_dash(int mode); // 0->1->2->0, as the F10 pump does
@@ -145,5 +176,15 @@ class Hud {
     std::vector<uint8_t> dashboard_, dashboard_low_, meter_, meter_low_;
     std::array<int32_t, 55> layout_{};
     std::array<int32_t, 55> layout_mini_{};
+    // Performance: the dashboard artwork blit is identical every frame for a
+    // given (scale, low_); cached as runs of opaque pixels and copied in.
+    struct ArtSpan {
+        int y, x, n;
+        size_t offset;
+    };
+    mutable std::vector<ArtSpan> art_spans_;
+    mutable std::vector<uint32_t> art_pixels_;
+    mutable int art_scale_ = 0;
+    mutable bool art_low_ = false;
 };
 } // namespace rr

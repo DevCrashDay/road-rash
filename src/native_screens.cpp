@@ -95,6 +95,7 @@ void add_native_screens(FrontendData& data, bool mobile) {
     rows.push_back({ns::visual_style, ns::d_visual_style, native_popup::visual_style});
     // Plan 20 Task 3: TEXTURE DETAIL row (Original / Enhanced).
     rows.push_back({ns::tex_detail, ns::d_tex_detail, native_popup::tex_detail});
+    rows.push_back({ns::split_layout, ns::d_split_layout, native_popup::split_layout});
     if (!mobile) {
         rows.push_back({ns::vsync, ns::d_vsync, native_popup::on_off});
         rows.push_back({ns::fps, ns::d_fps, native_popup::on_off});
@@ -162,6 +163,8 @@ void add_native_screens(FrontendData& data, bool mobile) {
     // Plan 20 Task 3: Original / Enhanced.
     data.popups[native_popup::tex_detail] =
         build_popup(rtpl, ns::tex_detail, {{1, ns::tex_original}, {2, ns::tex_enhanced}});
+    data.popups[native_popup::split_layout] =
+        build_popup(rtpl, ns::split_layout, {{1, ns::split_horizontal}, {2, ns::split_vertical}});
     // Plan 21 Task 9: visual style + per-effect popups.
     data.popups[native_popup::visual_style] = build_popup(
         rtpl, ns::visual_style, {{1, ns::style_original}, {2, ns::style_enhanced}, {3, ns::style_custom}});
@@ -307,22 +310,42 @@ void add_native_screens(FrontendData& data, bool mobile) {
     {
         MenuScreen& pad = data.screens[screen_id::native_gamepad];
         column(pad, ns::gamepad_title);
+        const int pstep = fit_step(tpl.h, tpl.y, 9);
+        const int ph = std::min(tpl.h, pstep - 2);
+        auto pad_row = [&](MenuItem m) {
+            m.w = std::max(m.w, 308);
+            m.h = ph;
+            return m;
+        };
         const int maps[4] = {ns::pad_map1, ns::pad_map2, ns::pad_map3, ns::pad_map4};
         for (int i = 0; i < 4; ++i) {
             MenuItem m =
-                button(tpl.y + i * step, maps[i], 0, 0, 0, item_flag::title_desc | item_flag::description);
+                pad_row(button(tpl.y + i * pstep, maps[i], 0, 0, 0, item_flag::title_desc | item_flag::description));
             m.enabled = false; // info rows: visible, never focused
             pad.items.push_back(m);
         }
-        pad.items.push_back(button(tpl.y + 4 * step, ns::pad_swap, ns::d_swap, native_action::toggle_pad_swap,
-                                   0, item_flag::title_desc));
-        MenuItem dz = button(tpl.y + 5 * step, ns::pad_deadzone, ns::d_deadzone, 0, 0,
-                             item_flag::title_desc | item_flag::native_slider);
+        pad.items.push_back(pad_row(button(tpl.y + 4 * pstep, ns::pad_swap, ns::d_swap,
+                                           native_action::toggle_pad_swap, 0, item_flag::title_desc)));
+        MenuItem dz = pad_row(button(tpl.y + 5 * pstep, ns::pad_deadzone, ns::d_deadzone, 0, 0,
+                                     item_flag::title_desc | item_flag::native_slider));
         dz.desc = ns::d_deadzone;
         pad.items.push_back(dz);
+#ifdef __SWITCH__
+        pad.items.push_back(pad_row(button(tpl.y + 6 * pstep, ns::controllers, ns::d_controllers,
+                                           native_action::configure_controllers, 0, item_flag::description)));
+#else
+        pad.items.push_back(pad_row(value_item(tpl, tpl.y + 6 * pstep, ns::local_players, ns::d_local_players,
+                                               native_popup::local_players)));
+#endif
+        pad.items.push_back(pad_row(value_item(tpl, tpl.y + 7 * pstep, ns::split_layout, ns::d_split_layout,
+                                               native_popup::split_layout)));
         pad.items.push_back(
-            button(tpl.y + 6 * step, ns::back, 0, 0, 0x12, item_flag::title_desc | item_flag::escape));
+            pad_row(button(tpl.y + 8 * pstep, ns::back, 0, 0, 0x12, item_flag::title_desc | item_flag::escape)));
         chain(pad);
+        data.popups[native_popup::local_players] =
+            build_popup(rtpl, ns::local_players,
+                        {{1, ns::players_auto}, {2, ns::players_1}, {3, ns::players_2}, {4, ns::players_3},
+                         {5, ns::players_4}});
     }
     {
         MenuScreen& touch = data.screens[screen_id::native_touch];
@@ -346,7 +369,12 @@ void add_native_screens(FrontendData& data, bool mobile) {
             button(tpl.y + step, ns::sound, 0, 0, screen_id::native_sound, item_flag::title_desc));
         pause.items.push_back(
             button(tpl.y + 2 * step, ns::display, 0, 0, screen_id::native_display, item_flag::title_desc));
+#ifdef __SWITCH__
+        pause.items.push_back(button(tpl.y + 3 * step, ns::controls, 0, 0, screen_id::native_gamepad,
+                                     item_flag::title_desc));
+#else
         pause.items.push_back(button(tpl.y + 3 * step, ns::controls, 0, 0, 0x12, item_flag::title_desc));
+#endif
         pause.items.push_back(button(tpl.y + 4 * step, ns::quit_race, ns::d_quit_race,
                                      native_action::pause_quit, 0,
                                      item_flag::title_desc | item_flag::description));
@@ -356,18 +384,26 @@ void add_native_screens(FrontendData& data, bool mobile) {
     // working; nav extended from the last label row through the new rows.
     {
         auto& items = data.screens[0x12].items;
+        // Right column key labels [13..21] occupy x=260, w=360, h=30, ending at
+        // y=390; place Gamepad (and mobile Touch) directly below inside 640x480.
+        const MenuItem& col = items.size() > 21 ? items[21] : tpl;
         MenuItem gp = tpl;
-        gp.y = tpl.y + 8 * step;
+        gp.x = col.x;
+        gp.y = col.y + col.h;
+        gp.w = col.w;
+        gp.h = col.h;
         gp.caption = ns::gamepad_title;
         gp.handler = 0;
         gp.target = screen_id::native_gamepad;
         gp.desc = 0;
         gp.flags = item_flag::title_desc | item_flag::description;
         gp.enabled = true;
+        gp.nav[0] = 11;
+        gp.nav[1] = 11;
         gp.nav[2] = 21;
         gp.nav[5] = 21;
         MenuItem th = gp;
-        th.y = tpl.y + 9 * step;
+        th.y = gp.y + gp.h;
         th.caption = ns::touch_title;
         th.target = screen_id::native_touch;
         th.nav[2] = 22;

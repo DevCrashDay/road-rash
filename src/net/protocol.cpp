@@ -171,7 +171,7 @@ bool valid(const Message& m) {
             using T = std::decay_t<decltype(v)>;
             if constexpr (std::is_same_v<T, Hello>)
                 return v.protocol == protocol_version && text_ok(v.alias, max_alias, false) &&
-                       v.platform <= Platform::bot;
+                       v.platform <= Platform::switch_nx;
             else if constexpr (std::is_same_v<T, Welcome>)
                 return v.room_code.empty() || valid_room_code(v.room_code);
             else if constexpr (std::is_same_v<T, Reject>)
@@ -366,7 +366,7 @@ std::optional<Message> decode_body(uint8_t type, Reader& r) {
         v.protocol = r.u16();
         v.sim_fingerprint = r.u64();
         r.bytes(v.data_digest);
-        v.platform = Platform(r.range<uint8_t>(r.u8(), 0, uint8_t(Platform::bot)));
+        v.platform = Platform(r.range<uint8_t>(r.u8(), 0, uint8_t(Platform::switch_nx)));
         v.alias = r.str8(max_alias);
         if (r.boolean()) {
             SeatToken t{};

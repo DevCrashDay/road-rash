@@ -23,7 +23,8 @@ struct RaceActionContext {
     bool demo = false, career = false, finished = false, paused = false, quitting = false;
     bool has_menu = false, menu_open = false;
     bool pause_message = false; // original Pause-key message is up
-    SDL_JoystickID pad = 0;     // 0 = no pad open
+    SDL_JoystickID pad = 0;     // 0 = no pad open on SDL3; SDL2/Switch IDs start at 0
+    bool has_pad = false;       // true when a pad is open (needed when valid ID can be 0)
 };
 // One decision per event; mirrors run_race as of the plan-25 fixes.
 RaceAction race_action(const SDL_Event&, const RaceActionContext&);

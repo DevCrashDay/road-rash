@@ -36,11 +36,21 @@ class RaceScreen {
     RaceEnd result_;
     LifecycleWatch lifecycle_;
     TouchInput touch_;
-    JoystickAnalog joy_analog_; // DAT_004b7e78 / DAT_004b7e7c, kept between polls
+    std::array<JoystickAnalog, 4> joy_analogs_{};
     TickClock clock_;
     SpriteCache sprites_;
-    CourseCanvas canvas_;
-    GamepadPtr pad_;
+    std::array<CourseCanvas, 4> canvases_{};
+#ifdef __SWITCH__
+    std::shared_ptr<GpuRaceRenderer> gpu_;
+#endif
+    // Splitscreen seats 1..3: interpolated views in presentation_copy(seat)
+    // row order (seat 0 uses g_.view_*). Captured with g_.view_cur.
+    std::array<ViewState, 4> seat_prev_{}, seat_cur_{}, seat_drawn_{};
+    // PERF-PROBE (Switch): phase averages logged every 120 frames.
+    FrameProfile perf_;
+    std::array<uint64_t, FrameProfile::count> perf_sum_{};
+    uint64_t perf_frames_ = 0, perf_total_ns_ = 0, perf_copy_ns_ = 0, perf_canvas_ns_ = 0, perf_steps_ = 0;
+    std::array<GamepadPtr, 4> pads_{};
     TexturePtr pause_tex_;
     int pause_scale_w_ = 0;
     RgbImage pause_img_;

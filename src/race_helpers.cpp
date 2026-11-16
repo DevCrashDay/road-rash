@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#ifdef __SWITCH__
+#include <switch.h>
+#endif
 
 namespace rr {
 GamepadPtr open_first_gamepad() {
@@ -453,4 +456,53 @@ void pause_event(Frontend* menu, const SDL_Event& e, GamepadPtr& pad, SDL_Render
         return;
     menu->update(in, SDL_GetTicks());
 }
+
+#ifdef __SWITCH__
+int configure_switch_controllers(int current_count) {
+    HidLaControllerSupportArg arg;
+    hidLaCreateControllerSupportArg(&arg);
+    arg.hdr.player_count_min = 0;
+    arg.hdr.player_count_max = 4;
+    arg.hdr.enable_take_over_connection = 0; // force Nintendo Switch Controller UI to open
+    arg.hdr.enable_left_justify = 1;
+    arg.hdr.enable_permit_joy_dual = 1;
+    arg.hdr.enable_single_mode = 0; // 0 allows 1..4 controllers in Controller Support UI
+    arg.hdr.enable_identification_color = 1;
+    arg.identification_color[0] = {40, 120, 240, 255};
+    arg.identification_color[1] = {240, 50, 50, 255};
+    arg.identification_color[2] = {50, 200, 70, 255};
+    arg.identification_color[3] = {240, 190, 40, 255};
+    arg.enable_explain_text = 1;
+    hidLaSetExplainText(&arg, "Player 1", HidNpadIdType_No1);
+    hidLaSetExplainText(&arg, "Player 2", HidNpadIdType_No2);
+    hidLaSetExplainText(&arg, "Player 3", HidNpadIdType_No3);
+    hidLaSetExplainText(&arg, "Player 4", HidNpadIdType_No4);
+
+    HidLaControllerSupportResultInfo result_info{};
+    const ::Result rc = hidLaShowControllerSupport(&result_info, &arg);
+
+    // Reinitialize SDL2 gamecontroller subsystem so Joy-Con Dual/Single mappings refresh cleanly.
+    SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+    SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+    SDL_PumpEvents();
+    SDL_FlushEvents(SDL_JOYAXISMOTION, SDL_CONTROLLERDEVICEREMAPPED);
+
+    int next_count = std::clamp(current_count, 1, 4);
+    if (R_SUCCEEDED(rc)) {
+        if (result_info.player_count >= 1 && result_info.player_count <= 4) {
+            next_count = result_info.player_count;
+        } else {
+            int connected = 0;
+            for (int i = 0; i < 4; ++i) {
+                if (hidGetNpadStyleSet(static_cast<HidNpadIdType>(HidNpadIdType_No1 + i)) != 0) ++connected;
+            }
+            next_count = std::clamp(connected, 1, 4);
+        }
+    } else if (hidGetNpadStyleSet(HidNpadIdType_Handheld) != 0) {
+        // Attached Joy-Cons in handheld mode -> single controller.
+        next_count = 1;
+    }
+    return next_count;
+}
+#endif
 } // namespace rr

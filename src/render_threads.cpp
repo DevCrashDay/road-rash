@@ -10,6 +10,12 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#ifdef __SWITCH__
+#include <cstdio>
+extern "C" uint32_t svcGetCurrentProcessorNumber(void);
+extern "C" uint32_t svcSetThreadCoreMask(uint32_t handle, int32_t preferred_core, uint32_t affinity_mask);
+extern "C" void svcSleepThread(int64_t nano);
+#endif
 namespace rr {
 namespace {
 int16_t narrow_point(int32_t v) {
@@ -24,7 +30,7 @@ struct RenderThreads::Impl {
         int band = 0, top = 0, bottom = 0;
     };
     explicit Impl(int n) : stop(false), generation(0), pending(0) {
-        for (int i = 0; i < n; ++i) workers.emplace_back([this] { loop(); });
+        for (int i = 0; i < n; ++i) workers.emplace_back([this, i] { loop(i); });
     }
     ~Impl() {
         {
@@ -34,7 +40,19 @@ struct RenderThreads::Impl {
         wake.notify_all();
         for (auto& t : workers) t.join();
     }
-    void loop() {
+    void loop(int index) {
+#ifdef __SWITCH__
+        // libnx starts every pthread on the creator's core; spread the pool
+        // over the three application cores (0..2) or the bands run serially.
+        const int core = index % 3;
+        svcSetThreadCoreMask(0xFFFF8000u /* CUR_THREAD_HANDLE */, core, 1u << core);
+        svcSleepThread(0); // yield so the kernel migrates the thread now
+        std::printf("[perf] render worker %d on core %u\n", index,
+                    unsigned(svcGetCurrentProcessorNumber())); // PERF-PROBE
+        std::fflush(stdout);
+#else
+        (void)index;
+#endif
         uint64_t seen = 0;
         for (;;) {
             Job work{-1, 0, 0};

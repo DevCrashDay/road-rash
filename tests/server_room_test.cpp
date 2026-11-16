@@ -364,5 +364,71 @@ int main() {
         check(contiguous >= 150,
               "lossy unreliable channel still delivers every sealed tick (repeat until acked)");
     }
+    // Switch-only enforcement + admin controls: reject non-Switch platforms, accept switch_nx, test kick/broadcast/close/config.
+    {
+        ServerConfig nx_cfg = cfg;
+        nx_cfg.switch_only = true;
+        Server nx(nx_cfg);
+        for (Platform blocked_p : {Platform::unknown, Platform::macos, Platform::android, Platform::web,
+                                   Platform::linux_desktop, Platform::windows, Platform::bot}) {
+            Client pc = connect(nx);
+            Hello h = hello("PCClient");
+            h.platform = blocked_p;
+            pc.send(h);
+            run(nx, 10);
+            const auto rej = pc.last<Reject>();
+            check(rej && rej->reason == RejectReason::protocol, "non-switch rejected");
+            check(pc.ch->status() == ChannelStatus::closed, "non-switch socket closed");
+        }
+        check.eq(nx.counters().blocked_non_switch, uint64_t(7), "blocked_non_switch counted");
+
+        Client sw1 = connect(nx);
+        Hello h1 = hello("Switch1");
+        h1.platform = Platform::switch_nx;
+        sw1.send(h1);
+        sw1.send(RoomCreate{{0, 2, true, true}});
+        run(nx, 10);
+        const auto w1 = sw1.last<Welcome>();
+        check(w1 && valid_room_code(w1->room_code), "switch_nx creates room");
+
+        Client sw2 = connect(nx);
+        Hello h2 = hello("Switch2");
+        h2.platform = Platform::switch_nx;
+        sw2.send(h2);
+        sw2.send(RoomJoin{w1->room_code, false});
+        run(nx, 10);
+        check(sw2.last<Welcome>() && sw2.last<Welcome>()->room_code == w1->room_code, "switch_nx joins room");
+
+        check(nx.admin_broadcast_room(w1->room_code, "Maintenance soon", now), "admin broadcast");
+        run(nx, 10);
+        const auto chat = sw2.last<ChatRelay>();
+        check(chat && chat->text == "Maintenance soon", "broadcast received by room");
+
+        const std::string st = nx.admin_state_json(now);
+        check(st.find("\"switch_only\":true") != std::string::npos &&
+                  st.find("\"switch_nx\"") != std::string::npos,
+              "admin state JSON reports switch_nx & switch_only");
+
+        rr::netd::AdminConfigPatch patch;
+        patch.maintenance_mode = true;
+        patch.min_humans = 3;
+        nx.admin_update_config(patch, now);
+        Client sw3 = connect(nx);
+        Hello h3 = hello("Switch3");
+        h3.platform = Platform::switch_nx;
+        sw3.send(h3);
+        sw3.send(RoomCreate{{0, 0, false, false}});
+        run(nx, 10);
+        check(sw3.last<Reject>() && sw3.last<Reject>()->reason == RejectReason::server_full,
+              "maintenance mode blocks new rooms");
+
+        check(nx.admin_kick_connection(w1->client_id, now), "admin kick succeeds");
+        run(nx, 10);
+        check(sw1.ch->status() == ChannelStatus::closed, "kicked client disconnected");
+
+        check(nx.admin_close_room(w1->room_code, now), "admin close room succeeds");
+        run(nx, 10);
+        check.eq(nx.room_count(), 0, "room removed on close");
+    }
     return check.finish("server_room");
 }

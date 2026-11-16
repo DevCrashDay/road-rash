@@ -154,6 +154,22 @@ const std::vector<ReferenceHash>& reference_hashes() {
     return hashes;
 }
 std::string data_root() {
+#ifdef __SWITCH__
+    FILE* f = fopen("romfs:/ROADRASH.EXE", "rb");
+    if (f) {
+        fclose(f);
+        printf("[data_root] Found romfs:/ROADRASH.EXE -> using 'romfs:/'\n");
+        return "romfs:/";
+    }
+    f = fopen("sdmc:/switch/roadrash/ROADRASH.EXE", "rb");
+    if (f) {
+        fclose(f);
+        printf("[data_root] Found sdmc:/switch/roadrash/ROADRASH.EXE -> using 'sdmc:/switch/roadrash/'\n");
+        return "sdmc:/switch/roadrash/";
+    }
+    printf("[data_root] Defaulting to 'romfs:/'\n");
+    return "romfs:/";
+#endif
     if (const char* override_path = SDL_getenv("RR_PREF_OVERRIDE"))
         return path_to_utf8(path_from_utf8(override_path) / "game" / "ROADRASH");
     // Plan 33b Task 5: a portable install keeps its disc beside the executable

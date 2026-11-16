@@ -212,6 +212,11 @@ Settings parse_settings(const std::string& text) {
             if (parse_int(v, 10, 40, x)) s.stick_deadzone = x;
         } else if (k == "left_handed")
             flag(s.left_handed);
+        else if (k == "local_players") {
+            if (parse_int(v, 0, 4, x)) s.local_players = x;
+        } else if (k == "split_layout") {
+            if (parse_int(v, 0, 1, x)) s.split_layout = SplitLayout(x);
+        }
         else if (k == "alias") {
             if (v.size() < 20) s.alias = v;
         } else if (k.size() == 10 && k.substr(0, 9) == "net_chat_" && k.back() >= '1' && k.back() <= '8') {
@@ -280,7 +285,8 @@ std::string format_settings(const Settings& s) {
       << "\nenh_vignette=" << s.enhancements.vignette << "\nenh_motion_blur=" << s.enhancements.motion_blur
       << "\ntouch_opacity=" << s.touch_opacity << "\nhaptics=" << s.haptics
       << "\nswap_punch_kick=" << s.swap_punch_kick << "\nstick_deadzone=" << s.stick_deadzone
-      << "\nleft_handed=" << s.left_handed << "\nalias=" << s.alias << "\nnet_server=" << s.net_server
+      << "\nleft_handed=" << s.left_handed << "\nlocal_players=" << s.local_players
+      << "\nsplit_layout=" << int(s.split_layout) << "\nalias=" << s.alias << "\nnet_server=" << s.net_server
       << "\nnet_seat=" << s.net_seat << "\nnet_room=" << s.net_room << "\n";
     for (size_t i = 0; i < s.net_chat.size(); ++i) o << "net_chat_" << i + 1 << "=" << s.net_chat[i] << "\n";
     return o.str();

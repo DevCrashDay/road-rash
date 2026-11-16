@@ -8,6 +8,7 @@
 #include "sealer.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -41,6 +42,8 @@ struct ServerConfig {
     int max_spectators = 16; // per room
     int hash_every = 60;     // Hash cadence; matches net::Rollback's default
     uint64_t seed = 0;                  // 0: seed from std::random_device
+    bool switch_only = false;           // daemon defaults true via RR_NETD_SWITCH_ONLY=1
+    bool maintenance_mode = false;      // rejects new rooms while keeping active games running
 };
 
 struct Counters {
@@ -49,6 +52,20 @@ struct Counters {
     uint64_t reconnects = 0, wrong_seat_inputs = 0;
     uint64_t invalid = 0;        // well-formed but impossible here (tick range, cadence, direction)
     uint64_t fanout_limited = 0; // fan-out messages dropped by their own bucket
+    uint64_t blocked_non_switch = 0, admin_kicks = 0, admin_closed_rooms = 0;
+};
+
+struct ServerEvent {
+    uint64_t ts_ms = 0;
+    std::string kind;
+    std::string json;
+};
+
+struct AdminConfigPatch {
+    std::optional<bool> switch_only;
+    std::optional<bool> maintenance_mode;
+    std::optional<int> min_humans;
+    std::optional<int> max_rooms;
 };
 
 // A finished race's complete record (Start + sealed timeline + hashes), for
@@ -74,10 +91,16 @@ class Server {
     void step(uint64_t now_ms);
 
     const Counters& counters() const { return counters_; }
+    const ServerConfig& config() const { return cfg_; }
     int room_count() const { return int(rooms_.size()); }
     int connection_count() const { return int(conns_.size()); }
     int player_count() const;
     std::string health_json(uint64_t now_ms) const;
+    std::string admin_state_json(uint64_t now_ms) const;
+    bool admin_kick_connection(ConnId id, uint64_t now_ms);
+    bool admin_close_room(const std::string& code, uint64_t now_ms);
+    bool admin_broadcast_room(const std::string& code, const std::string& text, uint64_t now_ms);
+    void admin_update_config(const AdminConfigPatch& patch, uint64_t now_ms);
     // Called with every finished race (the server's log sink).
     std::function<void(const RaceRecord&)> on_race_finished;
     std::function<void(const std::string&)> log; // structured log lines (JSON)
@@ -174,7 +197,9 @@ class Server {
     std::map<ConnId, Conn> conns_;
     std::map<std::string, Room> rooms_;
     ConnId next_id_ = 1;
+    uint64_t last_now_ms_ = 0;
     Counters counters_;
+    std::deque<ServerEvent> events_;
 };
 
 } // namespace rr::netd

@@ -238,6 +238,10 @@ int main() {
         const std::vector<uint8_t> b = encode(big);
         check(!b.empty() && b.size() <= max_message_bytes, "largest log chunk fits in 64 KB");
         check(decode(b).has_value(), "largest log chunk decodes");
+        Hello nx = std::get<Hello>(all[0].second);
+        nx.platform = Platform::switch_nx;
+        const auto nx_dec = decode(encode(nx));
+        check(nx_dec && std::get<Hello>(*nx_dec).platform == Platform::switch_nx, "switch_nx round-trip");
         std::vector<uint8_t> oversized(max_message_bytes + 1, 0);
         oversized[0] = 21;
         check(rejects(oversized), "oversized message rejected before parsing");

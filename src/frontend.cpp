@@ -332,6 +332,8 @@ std::string Frontend::caption_text(const MenuItem& m) const {
     if (m.handler == native_action::toggle_mute || m.handler == native_action::toggle_swap ||
         m.handler == native_action::toggle_pad_swap || m.handler == native_action::toggle_left_handed)
         return str(m.caption) + " Off";
+    if (m.handler == native_action::configure_controllers)
+        return str(m.caption) + ": " + std::to_string(std::clamp(settings_.local_players, 1, 4)) + "P";
     return str(m.caption);
 }
 
@@ -933,6 +935,10 @@ int Frontend::native_current(uint32_t popup) const {
         return visual_style_current();
     case native_popup::tex_detail:
         return settings_.texture_detail ? 2 : 1;
+    case native_popup::local_players:
+        return settings_.local_players + 1; // auto = 1, 1..4 players = 2..5
+    case native_popup::split_layout:
+        return int(settings_.split_layout) + 1;
     case native_popup::enh_filter:
         return int(settings_.enhancements.filter) + 1;
     case native_popup::enh_grade:
@@ -982,6 +988,12 @@ void Frontend::open_native_popup(uint32_t popup) {
         break;
     case native_popup::tex_detail:
         setter = native_setter::tex_detail;
+        break;
+    case native_popup::local_players:
+        setter = native_setter::local_players;
+        break;
+    case native_popup::split_layout:
+        setter = native_setter::split_layout;
         break;
     case native_popup::enh_filter:
         setter = native_setter::enh_filter;
@@ -1090,6 +1102,13 @@ std::string Frontend::native_value_text(int caption) const {
         return native_string(ns::wide_off + int(settings_.widescreen));
     case ns::tex_detail:
         return native_string(settings_.texture_detail ? ns::tex_enhanced : ns::tex_original);
+    case ns::local_players:
+        return native_string(ns::players_auto + settings_.local_players);
+    case ns::controllers:
+        return native_string(ns::players_auto + std::clamp(settings_.local_players, 1, 4));
+    case ns::split_layout:
+        return native_string(settings_.split_layout == SplitLayout::vertical ? ns::split_vertical
+                                                                           : ns::split_horizontal);
     default:
         return {};
     }
@@ -1108,6 +1127,12 @@ void Frontend::apply_native_setting() {
         if (row.caption == ns::render_resolution) row.desc = ns::d_render_resolution;
         if (row.desc >= native_slot_base) describe(row);
     }
+}
+
+void Frontend::set_local_players(int count) {
+    settings_.local_players = std::clamp(count, 1, 4);
+    if (focus_ >= 0 && size_t(focus_) < items_.size() && items_[size_t(focus_)].desc >= native_slot_base)
+        describe(items_[size_t(focus_)]);
 }
 
 // 0x0040fd90: 0x0040e7b0 per row, then slots 160-168 point at the labels.
@@ -1612,9 +1637,13 @@ int Frontend::run_handler(size_t index) {
         select_mode(career_, tables_, GameMode::big_game);
         return m.target;
     case 0x00430140:
-        if (!net_attached()) return 0;
         career_.mode = GameMode::mano;
-        return 11;
+        if (net_attached()) return 11;
+#ifdef __SWITCH__
+        return 5;
+#else
+        return 0;
+#endif
     case 0x0042fc40:
         net_open_host();
         return 0;
@@ -1655,11 +1684,9 @@ int Frontend::run_handler(size_t index) {
         editing_chat_ = std::clamp(m.target, 0, 7);
         return 0;
     case 0x004213c0: {
-        if (career_.mode == GameMode::mano) {
-            if (net_in_room()) {
-                net_->vote_course(m.target);
-                net_->set_ready(true);
-            }
+        if (career_.mode == GameMode::mano && net_in_room()) {
+            net_->vote_course(m.target);
+            net_->set_ready(true);
             return 0;
         }
         // Course chosen: reset standings, Start video, "Get ready" screen whose item starts the race.
@@ -1869,6 +1896,9 @@ int Frontend::run_handler(size_t index) {
     case native_action::toggle_left_handed:
         settings_.left_handed = !settings_.left_handed;
         apply_mixer_setting();
+        return 0;
+    case native_action::configure_controllers:
+        events_.push_back({FrontendEvent::Kind::configure_controllers, {}, 0});
         return 0;
     case native_action::pause_resume: // plan 18 Task 8: RESUME and Back/B/Escape resume
         pause_open_ = false;
@@ -2097,6 +2127,14 @@ int Frontend::run_handler(size_t index) {
             break;
         case native_setter::tex_detail:
             settings_.texture_detail = target == 2;
+            apply_native_setting();
+            break;
+        case native_setter::local_players:
+            settings_.local_players = std::min(4, std::max(0, target - 1));
+            apply_native_setting();
+            break;
+        case native_setter::split_layout:
+            settings_.split_layout = (target == 2) ? SplitLayout::vertical : SplitLayout::horizontal;
             apply_native_setting();
             break;
         }
