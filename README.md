@@ -1,283 +1,99 @@
-# Road Rash — Native Port
+# Road Rash NX — Nintendo Switch Port & Switch-Only Multiplayer
 
-Native C++20 / SDL3 port of the 1996 Windows rerelease of Road Rash.
-Runs the game directly on modern systems: no Wine, no x86 emulation at runtime.
+Fork of [arkits/road-rash](https://github.com/arkits/road-rash) focused on **Nintendo Switch homebrew** (`aarch64` / libnx), **local 1–4 player couch splitscreen**, and a **self-hosted Switch-to-Switch-only online multiplayer backend** (`rr-netd`) with an authenticated Web Admin Console.
 
-Platforms: macOS ARM64 (primary), Android ARM64, Linux x86-64/ARM64
-(including Steam Deck) and Windows x64/ARM64, plus a WebAssembly browser
-build. Linux and Windows builds, tests and packages are done (plans 33a and
-33b); Android, Linux, Steam Deck and Windows still await testing on real
-hardware. The port is incomplete; see Status below.
+Companion Web ISO → NRO builder repository: [DevCrashDay/road-rash-nx](https://github.com/DevCrashDay/road-rash-nx).
 
-Reference for reverse engineering is the unmodified disc binary at
-`../cdrom/ROADRASH/ROADRASH.EXE`. Oracle captures run it under Wine to
-produce comparison traces. It is never executed by the game itself.
+---
 
-## Status
+## Key Additions in This Fork
 
-The port is playable but not finished. `rr-game` runs the full original
-front end (menus, Thrash and Big Game careers, shop, Schmooze, results,
-saves, credits) into races on all five courses (Napa, City, Highway,
-Canyon, Medley). Races have the original bike physics, AI field, combat,
-traffic, pedestrians, police, engine and effect audio, soundtrack and
-cutscenes. Online mano-a-mano for two to eight players (plan 34) works over
-the internet through the `rr-netd` server, with room codes and invite links.
+### Nintendo Switch Port (`__SWITCH__` & `switch-nx` branch)
+- **Hardware GLES2 Race Renderer (`src/gpu_race.cpp`):** Renders sky/horizon, world quads, fog, grading/post-effects, and dashboard directly into SDL target textures on Switch / Ryujinx.
+- **Native Horizon Controller Applet (`hidLaShowControllerSupport`):** Always boots in single-player mode (`local_players = 1` on Switch startup) and adds 2–4 local players only when connected through **Controls → Controllers** in the main menu or in-race pause menu.
+- **Selectable Splitscreen Layout:** Choose **Horizontal** or **Vertical** splitscreen in **Gamepad** or **Display** settings for 2–4 local players with per-seat aspect scaling and player badges (`P1`–`P4`).
+- **Cached Asset Digest (`net_digest_v2.bin`):** Verifies the reference disc data once and caches the digest on SD (`sdmc:/switch/roadrash/`) for fast online lobby startup.
+- **Switch WebSocket Transport (`ws_channel_switch.cpp`):** Native `bsd:u` / `ssl` / `sfdnsres` WebSocket client supporting `ws://` (LAN/Ryujinx) and `wss://` (TLS).
 
-Measured against the original:
+### Online Multiplayer Fixes
+- **Switch Platform Identity (`Platform::switch_nx`):** Identifies Switch clients cleanly in `Hello` handshakes (`platform = 7`).
+- **Fullscreen Online Viewport:** Forces 1-player fullscreen rendering during online races instead of splitting the screen across remote opponent seats.
+- **Unified Rollback Clock:** Uses `SDL_GetTicks()` consistently across lobby handover (`Client::begin`) and race ticks (`RaceScreen::step_online`), preventing countdown `7` clock-sync stalls.
+- **Online In-Race Pause Menu (`+` / `-`):** Opens the pause overlay (`Resume`, `Sound`, `Display`, `Controls`, `Quit Race`) without pausing online rollback ticks; **Quit Race** sends `RoomLeave` and returns cleanly to the lobby.
 
-- **Simulation:** Napa level 1 with the full 14-rider field matches for
-  2400/2400 ticks; a recorded human-input run matches for 1431/1431 ticks.
-  Both use one RNG anchor and then run freely.
-- **Police:** pursuit, siren and arrest match tick for tick on parked,
-  crashed and on-foot captures, and on City up to the arrest.
-- **Front end:** all 223 original menu items pass the layout sweep. Menu
-  pictures are bit-exact against the original's decoded images, and menu text
-  is Wine-GDI exact. 18 of 20 captured screens match the original pixel for
-  pixel; the other two differ only in rows the port adds (Display) or gates
-  on the network (Mano-À-Mano). Seeded original-writer saves round-trip byte
-  for byte, as do saves from a driven career.
-- **Tests:** 134/134 CTests with the disc and zero skips on macOS and on
-  Linux (GCC and Clang, x86-64 and ARM64); ASan/UBSan and TSan clean.
-- **Determinism:** the determinism matrix gives equal race results on
-  macOS, Linux (GCC/Clang, x86-64/ARM64), Windows (MSVC, clang-cl, ARM64)
-  and WebAssembly. In CI, bots on six platforms (macOS, Linux x86-64/ARM64,
-  Windows x64/ARM64, WebAssembly under Node) finish one live online room
-  with equal hashes and an official result. A real browser tab in a mixed
-  room has not been tested yet.
+### Switch-Only Multiplayer Backend & Web Admin Console (`server/` & `switch-server/`)
+- **Strict Platform Gate (`RR_NETD_SWITCH_ONLY=1`):** Rejects non-Switch clients (`web`, `windows`, `macos`, `linux`, `android`, `bot`, `unknown`) at `Hello` with `RejectReason::protocol` while logging and counting blocked attempts.
+- **Web Admin Console (`/admin` & `/net/health`):** Single-page dark admin dashboard behind Caddy reverse proxy, protected by `RR_NETD_ADMIN_TOKEN` (cookie / Bearer auth):
+  - Live KPIs (`players`, `rooms`, `connections`, `blocked_non_switch`, `desyncs`, `late_inputs`).
+  - Live room/seat monitor (roster, characters, votes, ready flags, ping, current tick) with **Kick**, **Close Room**, and **Broadcast** actions.
+  - Runtime config toggles (`switch_only`, `maintenance_mode`, `min_humans`, `max_rooms`), event feed, and `.rrlog` replay downloads.
 
-Platforms:
+---
 
-| Platform | State |
+## Branch Layout
+
+| Branch | Contents |
 | --- | --- |
-| macOS ARM64 | Main development target; app bundle and zip |
-| Android ARM64 | APK builds; not yet tested on a device |
-| Linux x86-64/ARM64, Steam Deck | Tarball, AppImage and Flatpak built and smoke-tested on clean distributions; not yet tested on a real desktop or a Deck (plan 33a) |
-| Windows x64/ARM64 | Zip and per-user installer built and install-tested on CI; unsigned; not yet tested on real hardware (plan 33b) |
-| Browser (WebAssembly) | Playable; see [docs/WEB.md](docs/WEB.md) |
+| `main` | Core C++20/SDL engine, GLES2 Switch race renderer, `rr-netd` Switch-only server + `/admin` console, C++ tests |
+| `switch-nx` | Everything on `main` plus `switch-roadrash/` (libnx wrapper, WS client, `build_switch.py`, PC/Web builders) and `switch-server/` (Docker Compose, Caddyfile, 2-instance Ryujinx launcher) |
 
-Still open (see `docs/CURRENT_STATUS.md` and `docs/PROGRESS.md`):
+*(Commercial game data, `.iso` disc dumps, `romfs/`, compiled `.nro`/`.elf`/`.nsp` binaries, and `.env` / key files are excluded from source control.)*
 
-- **Simulation parity** outside the captured runs: other courses and
-  levels, City AI RNG past tick 954, human paths beyond the recorded run,
-  and isolated fight, steal and traffic cases (plans 10, 16, 17).
-- **Front end:** AWE32 music timbre. The SoundFont banks play with their
-  generator semantics and stand-in reverb and chorus, but nothing has been
-  measured against real AWE32 hardware, and the factory-ROM instruments
-  need an owner-supplied ROM dump. Filled controls key labels have no
-  original capture to compare against.
-- **Online:** device and cross-play acceptance on Android and real
-  desktops, and the long soak tests (plan 34 Tasks 10–11).
-- **Hardware:** Android, desktop Linux, Steam Deck and Windows (plans 14,
-  33a, 33b). Owner decisions remain on signing, the licence and Flathub
-  (plan 15).
+---
 
-## Browser build
+## Running the Switch-Only Server (`switch-server/`)
 
-The same game now runs as WebAssembly. Run `tools/build_web.sh`, then serve
-`build-agent-browser/dist/` with a local HTTP server. Import your original PC
-disc ISO or ROADRASH folder; files stay in private browser storage. Choose
-**Quick race** for immediate play or **Start game** for the original frontend.
-See [docs/WEB.md](docs/WEB.md) for deployment, tests and current limitations.
+1. Check out `switch-nx` (or copy `switch-server/` alongside `road-rash-arkits/`).
+2. Configure environment and build the stack with Docker Compose:
+   ```sh
+   cd switch-server
+   cp .env.example .env   # set a strong RR_NETD_ADMIN_TOKEN
+   docker compose up -d --build
+   ```
+3. Endpoints exposed via Caddy on port `8080`:
+   - **Switch WebSocket:** `ws://<server-ip>:8080/net` (or `wss://<domain>/net` after setting your domain in `switch-server/Caddyfile`)
+   - **Web Admin Console:** `http://localhost:8080/admin`
+   - **Health JSON:** `http://localhost:8080/net/health`
 
-## Requirements
+To test locally with two emulator windows on Windows, run `switch-server/launch_2_ryujinx.cmd` (creates isolated `.ryu-p1` / `.ryu-p2` profiles pointed at `ws://127.0.0.1:8080/net` with internet access enabled). To let a real Switch on the same Wi-Fi join a PC server/Ryujinx session, allow inbound TCP port `8080` in Windows Firewall and set `net_server=ws://<PC-LAN-IP>:8080/net`.
 
-- Your own 1997 Windows rerelease disc (ISO or extracted `ROADRASH`
-  folder, 341 files, SHA-256 verified on import). No game data is included
-  or redistributed.
-- CMake 3.22+, a C++20 compiler, SDL3 3.2+ (`brew install cmake sdl3`).
-  Linux: GCC 14 or Clang 19 with `cmake --preset linux-gcc` (or
-  `linux-clang`); the pinned SDL is built from source, and
-  `linux/install-gate-deps.sh` lists the Debian packages. Windows: Visual
-  Studio 2022 with `cmake --preset windows-msvc` (see Windows packaging).
-- Android builds additionally need JDK 21, Android SDK 35 / NDK 28, Gradle
-  wrapper in `android/`.
+---
 
-## Quick start
+## Real Switch & Ryujinx Setup
 
-Each script builds `rr-game` and launches it. It passes `--assets` when the
-disc is at `../cdrom/ROADRASH` (or the folder given as the first argument)
-and otherwise opens the first-run import screen. Further arguments go to
-`rr-game`.
+1. Build `roadrash_switch.nro` via [DevCrashDay/road-rash-nx](https://github.com/DevCrashDay/road-rash-nx) (supply your own 1996/1997 PC `ROADRASH.ISO`) or from source with devkitPro (`python switch-roadrash/scripts/build_switch.py` on the `switch-nx` branch). Both Switch and Ryujinx peers must run matching builds (identical `RR_SIM_SOURCE_HASH`).
+2. Copy the NRO to your microSD card:
+   ```text
+   sdmc:/switch/roadrash/roadrash_switch.nro
+   ```
+3. Configure your server URL in `sdmc:/switch/roadrash/settings.txt` (created on first run):
+   ```ini
+   net_server=ws://<server-lan-ip>:8080/net
+   ```
+4. Launch on Switch in **full RAM mode** (hold `R` while opening any installed title to open `hbmenu`, or use an `application_type: 1` forwarder targeting `sdmc:/switch/roadrash/roadrash_switch.nro`).
 
-macOS:
+---
 
-```sh
-./run-macos.sh                       # Release build in build-play/, launch game
-./run-macos.sh --debug               # Debug build in build/ (slower renderer)
-```
+## Switch Controls
 
-Linux (x86-64 or ARM64; on a Steam Deck use the AppImage instead):
-
-```sh
-./run-linux.sh                       # Release build in build-play/, launch game
-./run-linux.sh --debug               # Debug build in build/
-```
-
-If a tool or library is missing, it prints the install command for
-Debian/Ubuntu, Fedora or Arch. It needs GCC 13+ or Clang 17+.
-
-Windows (x64 or ARM64; Visual Studio 2022 or its Build Tools with
-"Desktop development with C++", plus Git and Python 3):
-
-```bat
-rem Release build in build-windows-msvc\ (ARM64: build-windows-msvc-arm64\)
-run-windows.bat
-rem Debug configuration (slower renderer)
-run-windows.bat -Debug
-```
-
-`run-windows.ps1` does the same from PowerShell. It enters the MSVC
-environment itself, and the first run clones vcpkg into `.tools\vcpkg`
-unless `VCPKG_ROOT` or `VCPKG_INSTALLATION_ROOT` points to one. Add
-`--console` to see the game's output in the terminal.
-
-Or with CMake directly:
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build --parallel
-ctest --test-dir build --output-on-failure
-build/rr-game --assets ../cdrom/ROADRASH
-```
-
-Options:
-
-```sh
-build/rr-game --assets ../cdrom/ROADRASH --course 0 --level 1 --bike 0
-build/rr-game --assets ../cdrom/ROADRASH --video VIDEO/INTRO.AVI
-```
-
-`--course 0-4` (Napa, City, Highway, Canyon, Medley),
-`--level 1-5`, `--bike 0-14`, `--character 1-8` (Axle .. Teflon Mike).
-An interactive quick race is a Thrash race in the original front end: it
-ends on the original results and standings screens, then the Thrash menus.
-Omitting race flags enters the menu/career flow. `--ticks N --screenshot
-out.bmp` runs a headless verification slice; tool runs (`--ticks`,
-`--autopilot`, captures, benchmarks, `--opponents`) keep the standalone race.
-
-## Controls
-
-| Action | Keyboard | Gamepad | Touch |
-| --- | --- | --- | --- |
-| Accelerate | Up / W | South / RT | Free zones (auto-throttle) |
-| Brake | Down / S | East / LT | Bottom-middle zone |
-| Steer | Left/Right, A/D | D-pad / left stick | Left/right thirds |
-| Punch / Kick / Backhand | Z / X / C | West / North / RB | Top third |
-| Pause | P / Esc | Start | System Back / pause tap |
-| Restart after finish | Enter | South | Tap |
-| Quit (desktop) | Q | — | — |
-
-P/Esc/Start opens the pause menu (Resume, Sound, Display, Controls,
-Quit Race with confirmation). Backgrounding, focus loss, or disconnecting
-the active gamepad also pauses; resume is always explicit. Keys are
-rebindable in Graphics Options → Configure Input; gamepad mapping is fixed
-except punch/kick swap and stick dead zone.
-
-## Disc import
-
-First launch without `--assets` shows the import screen: pick the ISO or an
-extracted folder. The importer verifies all 341 files by SHA-256 and commits
-only a complete match; failures leave any existing install untouched.
-
-Command-line equivalent:
-
-```sh
-build/rr-import "/path/to/Road Rash.iso" "/path/to/imported/ROADRASH"
-build/rr-game --assets "/path/to/imported/ROADRASH"
-```
-
-Default destination is the SDL pref dir `RoadRashNative/RoadRash/game/ROADRASH`.
-`RR_PREF_OVERRIDE` redirects it for isolated test runs.
-
-## Tools
-
-| Binary / script | Purpose |
+| Action | Dual Joy-Con / Pro Controller |
 | --- | --- |
-| `build/rr-game` | The game (menus, career, races, video playback) |
-| `build/rr-viewer` (`./run-viewer.sh`) | Asset research viewer, not the game: screens, course drive-through |
-| `build/rr-import` | CLI disc import with hash verification |
-| `build/rr-inspect FILE.RSC` | Dump a resource container directory |
-| `build/rr-course --exe ../cdrom/ROADRASH/ROADRASH.EXE DATA/COURSES/*.CRS` | Course graph / projection sweep |
-| `python3 tools/check_corpus.py <assets>` | Validate all resource containers |
-| `python3 tools/render_demo.py` | Render a 2-minute 5-course demo MP4 from the engine |
-| `tools/bench_game.sh user original enhanced` | Race frame-time benchmark (`docs/PERFORMANCE.md`) |
-| `tools/ci.sh` | Local verification gate (native build, tests, APK assembly) |
+| Accelerate | `A` / `ZR` |
+| Brake | `B` / `ZL` |
+| Steer | Left Stick / D-Pad |
+| Punch / Kick / Backhand | `Y` / `X` / `R` |
+| Pause / In-Race Menu | `+` / `-` |
+| Controller & Splitscreen Setup | **Controls → Controllers** / **Split Screen** |
 
-Video playback uses native Cinepak / IMA-ADPCM decoders. FFmpeg appears
-only in tests as a decode oracle; runtime needs neither FFmpeg nor Wine.
+---
 
-## Android
+## Building Desktop / Server Standalone
+
+Requires CMake 3.22+, a C++20 compiler, and SDL3 3.2+ (the server target builds without SDL or game assets):
 
 ```sh
-export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
-android/gradlew -p android assembleDebug
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target rr-netd --parallel
 ```
 
-Output: `android/app/build/outputs/apk/debug/app-debug.apk`.
-Normal APKs ship no game data; on first launch pick your own ISO and it is
-verified the same way as desktop. SDK location lives in the ignored
-`android/local.properties`. Optimized local build:
-`assembleRelease -PreleaseDebugSigning=true`. Owner signing and versioning
-are documented in `docs/USER_GUIDE.md`. Device behavior is unverified.
-
-## macOS packaging
-
-```sh
-tools/build_macos_app.sh
-```
-
-Produces `build-release/Road Rash Native.app` and a ZIP with pinned static
-SDL3, ARM64 / macOS 13 baseline, bundled licences, ad-hoc signature, and no
-game data. Pushing a `v*` tag builds and attaches the same package via
-GitHub Actions.
-
-## Windows packaging
-
-From an MSVC developer prompt (`windows-msvc-arm64` for ARM64):
-
-```bat
-cmake --preset windows-msvc
-cmake --build build-windows-msvc --config Release
-python tools/build_windows_package.py --build-dir build-windows-msvc --arch x64
-python tools/verify_windows_package.py build-windows-msvc\package\RoadRashNative-<version>-windows-x64.zip --arch x64 --run
-```
-
-Produces a portable zip (`portable.txt` keeps data beside the exe) and, with
-Inno Setup 6.3+, a per-user installer, both with a static CRT and SDL, so
-they need no DLLs beyond Windows' own, and no game data. `tools/sign_windows.ps1` signs them when the owner sets
-`RR_SIGN_*`; otherwise they are unsigned and SmartScreen warns. The verifier
-needs `pip install pefile`. CI builds and install-tests both architectures.
-
-## Linux packaging
-
-Needs Docker (on a Mac, OrbStack or Docker Desktop builds both
-architectures; x86-64 runs under emulation):
-
-```sh
-tools/build_linux_package.sh x86_64       # or aarch64
-tools/linux_clean_host_smoke.sh build-linux-package/RoadRashNative-<version>-linux-x86_64.tar.gz \
-    build-linux-package/RoadRashNative-<version>-x86_64.AppImage x86_64
-tools/build_linux_flatpak.sh x86_64       # committed HEAD only
-```
-
-The tarball and AppImage are built in the Steam Runtime "sniper" SDK
-container (glibc 2.31 baseline) with static SDL, OpenSSL and libstdc++, so
-they need only glibc and whatever display and audio libraries the system
-has; `tools/verify_linux_package.py` checks that, the absence of game data
-and (on Linux) that both launch. The Flatpak builds from source against the
-freedesktop 24.08 runtime. Linux native gate: `tools/linux_gate.sh linux-gcc`
-inside the `linux/gate.Dockerfile` image (see `docs/TOOLING.md`).
-
-## Docs map
-
-- `docs/CURRENT_STATUS.md` — evidence matrix and latest gate receipts.
-- `docs/PROGRESS.md` — what is ported, approximations, next steps.
-- `docs/VERIFICATION.md` — commands run, outcomes, skips, evidence paths.
-- `docs/REVERSE_ENGINEERING.md` — recovered structures and addresses.
-- `docs/USER_GUIDE.md` — install, import, settings, controls reference.
-- `docs/plans/00-INDEX.md` — plan dependency order to completion.
-- `docs/AGENT_TOOLING.md` — agent workflow, gates, capture rules.
-
-Commercial assets, disc dumps, and upscaled artwork stay local and out of
-the source tree, APKs, and app bundles. Third-party licence texts are in
-`third_party/`. No redistribution licence for the game is implied.
+Your own unmodified 1997 Windows disc data (`ROADRASH.EXE` + 341 SHA-256 verified files) is required to run the game client. For full desktop/mobile/WASM documentation and reverse-engineering references, see `docs/` and upstream [arkits/road-rash](https://github.com/arkits/road-rash). Commercial assets are not included; third-party notices live in `third_party/`.
