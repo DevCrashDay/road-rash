@@ -1,0 +1,16 @@
+# Local HTTP listener (LAN / reverse-proxied behind external TLS).
+# For direct public Let's Encrypt HTTPS on a domain, replace `:80` with
+# `your-domain.example.com` and open ports 80 & 443.
+:80 {
+	handle /net/health {
+		reverse_proxy rr-netd:8081
+	}
+
+	handle /net* {
+		reverse_proxy rr-netd:8080
+	}
+
+	handle {
+		reverse_proxy rr-netd:8081
+	}
+}
